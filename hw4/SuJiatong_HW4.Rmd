@@ -1,0 +1,374 @@
+---
+title: "HW4 - Targeting A Housing Subsidy"
+author: "Jiatong Su"
+date: "October 31,2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+# Introduction
+
+The tax credit program aims to enhance house safety, livability, and  quality of community house, especially for low-income household. In the following analysis, we will perform exploratory analysis that describes key feature important. Moreover, introducing logistic regressions that focus on goodness fit for these models as well as cross-validation. Finally, developing a cost benefit analysis that estimate the revenues associated with model. 
+Ultimately, this analysis will inform decision-makers about the effectiveness of the tax credit program and guide future enhancements to maximize participation and improve community outcomes.
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+library(caret)
+library(knitr) 
+library(pscl)
+library(plotROC)
+library(pROC)
+library(lubridate)
+
+
+HousingSubidy <- read_csv("https://github.com/urbanSpatial/Public-Policy-Analytics-Landing/blob/0c6e18b06d1675858dff1741a9e4a363bfa761db/DATA/Chapter6/housingSubsidy.csv?raw=true")
+
+palette5 <- c("#981FAC","#CB0F8B","#FF006A","#FE4C35","#FE9900")
+palette4 <- c("#981FAC","#FF006A","#FE4C35","#FE9900")
+palette2 <- c("#981FAC","#FF006A")
+```
+
+# Data Exploration
+
+In this section, utilized some useful features are those that exhibit differences across whether the individual enter the program.
+
+In the following figures, plotting the mean for 2 continuous features grouped by whether the individual enter the program.
+
+```{r pressure, echo=FALSE}
+HousingSubidy %>%
+  dplyr::select(y, previous, spent_on_repairs, inflation_rate	, age) %>%
+  gather(Variable, value, -y) %>%
+    ggplot(aes(y, value, fill=y)) + 
+      geom_bar(position = "dodge", stat = "summary", fun = "mean") + 
+      facet_wrap(~Variable, scales = "free") +
+      scale_fill_manual(values = palette2) +
+      labs(x="Housing Subidy", y="Value", 
+           title = "Feature associations with the likelihood of Housing Subidy progrem",
+           subtitle = "(continous outcomes)") +
+      theme(legend.position = "none")
+```
+
+As we can see the plot, the age and the amount of spend on repairs do not show largely difference across the whether enter the credit program. However, lower inflation rate would have more in no enter the program, and higher number of contacts before this campaingn have more in entering the program.
+
+```{r}
+HousingSubidy %>%
+  dplyr::select(y,previous, spent_on_repairs, inflation_rate	, age) %>%
+  gather(Variable, value, -y) %>%
+  ggplot() + 
+    geom_density(aes(value, color=y), fill = "transparent") + 
+    facet_wrap(~Variable, scales = "free") +
+    scale_fill_manual(values = palette2) +
+    labs(title = "Feature distributions Subidy program",
+         subtitle = "(continous outcomes)")
+```
+
+the code below plots multiple category associations, and the plot suggests that marriged and mortgage have higher likelihood of enter in housing subsidy program.
+
+```{r}
+HousingSubidy %>%
+  dplyr::select(y,mortgage, marital) %>%
+  gather(Variable, value, -y) %>%
+  count(Variable, value, y) %>%
+      ggplot(., aes(value, n, fill = y)) +   
+        geom_bar(position = "dodge", stat="identity") +
+        facet_wrap(~Variable, scales="free") +
+        scale_fill_manual(values = palette2) +
+        labs(x="Click", y="Value",
+             title = "Feature associations with the likelihood of housing subsidy program",
+             subtitle = "Categorical features") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Variable Transformations
+
+The code below create a `Indicates the individual enter the program` for different type of job to use a continous instead of categorical variable.
+
+```{r}
+HousingSubidy_1 <- HousingSubidy %>% 
+  group_by(job) %>% 
+  summarize(totY = sum(y_numeric), 
+            n = n(), 
+            JobYAvg = 100*(totY/n)) %>%
+  dplyr::select(-n, -totY) %>%
+  right_join(HousingSubidy, .) 
+
+```
+
+# Create A Logistic Regression Model
+
+The code below split our data into a 65/35 traning/ test set `(p = .65)`.
+
+```{r}
+set.seed(3456)
+trainIndex <- createDataPartition(HousingSubidy$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+HouseSubidyTrain <- HousingSubidy_1[ trainIndex,]
+HouseSubidyTest  <- HousingSubidy_1[-trainIndex,]
+```
+
+This code chunks below runs model with dependent variable `y_numeric`, and use most variables in the regression. since using `y_numeric` is dependent variables, we deselect `y` (Indicates the individual enter the program).
+
+```{r}
+HouseSubidyModel_kitchen <- glm(y_numeric ~ .,
+                  data=HouseSubidyTrain %>% 
+                    dplyr::select(-y),
+                  family="binomial" (link="logit"))
+
+summary(HouseSubidyModel_kitchen)
+```
+
+The engineer feature aims to enhance model's sensitivity by incorporating relationships that are not directly captured in the raw data. For the engineer new feature, I transformed the new variable that call `JobYAvg`, calculating each job type average value to use a continuous instead of categorical variable. Furthermore, as Steif notes, "to keep things simple, the features are used as-is, without additional feature engineering or selection" (Steif). In the following code chunrk, I have deselected few feature variables, such as `month`,`day_of_week`, `education`,`y`,`job`,`takLien`. These adjustment add depth to the model's ability to distinguish cases where home repair subsidies are truly necessary, increasing the likelihood of capturing true positives effectively.
+
+The code below that is the engineered regression model.
+
+```{r}
+HouseSubidyModel <- glm(y_numeric ~ .,
+                  data=HouseSubidyTrain %>% 
+                  dplyr::select(-month, -day_of_week, -education, -y, -job, -taxLien),
+                  family="binomial" (link="logit"))
+
+summary(HouseSubidyModel)
+```
+
+
+# ROC
+
+```{r}
+testProbs <- data.frame(Outcome = as.factor(HouseSubidyTest$y_numeric),
+  Probs = 
+    predict(HouseSubidyModel, HouseSubidyTest, type= "response")) 
+
+testProbs <- 
+  testProbs %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs$Probs > 0.5 , 1, 0)))
+
+auc(testProbs$Outcome, testProbs$Probs)
+
+```
+
+
+The area under the curve is 0.8186, representing there's an 81.86% chance that model will correctly differentiate between the positive and negative cases.
+
+```{r}
+ggplot(testProbs, aes(d = as.numeric(Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - clickModel")
+```
+
+The figure visualizes trade-offs for two important confusion metrics. The y-axis of ROC curve shows the rate of true positives for each each threshold from 0.01 to 1, and the x-axis shows the rate of false positives for each threshold. According to ROC curve, a threshold that predicts entering credit program correctly around 65% of the time, will predict incorrectly more than 30% of the time. Moving from around 65% to a 90% true positive rate dramatically increases the false positive rate.
+
+# Cross Validation
+
+This section examines cross validate in both model. 
+
+## enginnered_cv
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+cvFit <- train(y ~ .,
+                  data=HousingSubidy_1 %>% 
+                    dplyr::select(-month, -day_of_week, -education, -y_numeric, -job, -taxLien), 
+                method="glm", family="binomial",
+                metric="ROC", trControl = ctrl)
+
+cvFit
+```
+
+```{r}
+dplyr::select(cvFit$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics",
+         subtitle = "Across-fold mean reprented as dotted lines")
+```
+
+## kitchen_sink
+
+```{r}
+
+kitchen_sink_cv <- train(y ~ ., 
+                         data = HousingSubidy_1 %>% 
+                    dplyr::select( -y_numeric), 
+                         method="glm", family="binomial",
+                         metric="ROC", trControl = ctrl)
+
+kitchen_sink_cv
+```
+
+```{r}
+dplyr::select(kitchen_sink_cv$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(kitchen_sink_cv$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of kitchen_sink_cv Metrics",
+         subtitle = "Across-fold mean reprented as dotted lines")
+```
+
+Comparing two model, the ROC value of engineered regression model is higher than ROC value of kitchen sink regression model, which represents the selected features contribute more effectively  distinguishing between classes. Additionally, higher sensitivity means the model is better at identifying positive cases(true positives). The engineered model has larger sensitivity value than kitchen sink model, indicating feature engineering improved the model's ability to detect true positive cases. In the other hand, the specificity measures how well model identifies negative cases. The kitchen sink regression shows higher specificity rate, meaning the model is effective at reducing false positives without sacrificing the identification of true negatives.
+
+# Cost-Benefit Calculation
+
+The code below that calculates each confusion metric and create the `Cost/Benefit Table`.
+
+-   True positive: Predicted correctly homeowner to join the program.
+
+    -   cost: HCD spends (on average) \$2,850 per homeowner
+    -   benefit: a \$10,000 premium, on average
+    -   since only 25% of contacted home oveners take the credit, so adjusting the benefit to (0.25\*(10,000+56,000))
+    -   Net benefit per True positive = (0.25×66,000)−2,850.
+
+-   True Negative: No marketing resource were allocating, so no marketing cost and benefit as the homeowner join.
+
+-   False Positive: Predicted incorrectly homeowner would enter the credit program; allocated marketing resources; no credit allocated.
+
+    -   Cost: \$2,850 per homeowner
+    -   Net cost per False Positive = - \$2850
+
+-   False Positive: Predict that homeowner would not enter the credit program but they did. Thus, assuming a neutral impact on cost/benefit (i.e.,/\$0)
+
+```{r}
+# Define constants for cost-benefit analysis
+Marketing_Cost <- 2850
+Program_Benefit <- (0.25 * (10000 + 56000))  # Adjusted benefit for 25% take-up rate
+
+# Modify cost-benefit table with updated calculations based on new insights
+cost_benefit_table <- testProbs %>%
+  count(predOutcome, Outcome) %>%
+  summarize(True_Negative = sum(n[predOutcome == 0 & Outcome == 0]),
+            True_Positive = sum(n[predOutcome == 1 & Outcome == 1]),
+            False_Negative = sum(n[predOutcome == 0 & Outcome == 1]),
+            False_Positive = sum(n[predOutcome == 1 & Outcome == 0])) %>%
+  gather(Variable, Count) %>%
+  mutate(Revenue =
+           ifelse(Variable == "True_Negative", Count * 0,
+           ifelse(Variable == "True_Positive", Count * (Program_Benefit - Marketing_Cost),
+           ifelse(Variable == "False_Negative", Count * 0,
+           ifelse(Variable == "False_Positive", Count * -Marketing_Cost, 0))))) %>%
+  bind_cols(data.frame(Description = c(
+             "Correctly predicted non-entry into program",
+             "Correctly predicted entry into program",
+             "Predicted non-entry but homeowner joined",
+             "Predicted entry but homeowner did not join")))
+
+# Display cost-benefit table with caption
+kable(cost_benefit_table,
+      caption = "Cost/Benefit Table") %>%
+  kable_styling()
+
+```
+
+The total revenue  in the cost/benefit table is  \$ 432,150. 
+
+# Optimize Thresholds
+```{r}
+str(testProbs)
+
+```
+
+```{r}
+
+
+# Assuming threshold_results data frame is already created as discussed earlier
+threshold_results <- data.frame(
+  Threshold = double(),
+  Total_Revenue = double(),
+  Total_Count_of_Credits = integer()
+)
+
+# Example thresholds from 0 to 1 in increments of 0.1 (adjust as needed)
+thresholds <- seq(0, 1, by = 0.1)
+
+# Calculate Total_Revenue and Total_Count_of_Credits for each threshold
+for (t in thresholds) {
+  # Adjusting probabilities based on the threshold
+  testProbs <- testProbs %>%
+    mutate(predOutcome = ifelse(Probs >= t, 1, 0))
+
+  cost_benefit <- testProbs %>%
+    count(predOutcome, Outcome) %>%
+    summarize(True_Positive = sum(n[predOutcome == 1 & Outcome == 1]),
+              False_Positive = sum(n[predOutcome == 1 & Outcome == 0]),
+              True_Negative = sum(n[predOutcome == 0 & Outcome == 0]),
+              False_Negative = sum(n[predOutcome == 0 & Outcome == 1])) %>%
+    summarize(
+      Total_Revenue = (True_Positive * (Program_Benefit - Marketing_Cost)) + 
+                      (False_Positive * -Marketing_Cost),
+      Total_Count_of_Credits = True_Positive
+    )
+
+  threshold_results <- rbind(threshold_results, 
+                             data.frame(Threshold = t,
+                                        Total_Revenue = cost_benefit$Total_Revenue,
+                                        Total_Count_of_Credits = cost_benefit$Total_Count_of_Credits))
+}
+
+# Transforming data for plotting
+plot_data <- threshold_results %>%
+  pivot_longer(cols = c(Total_Revenue, Total_Count_of_Credits), 
+               names_to = "Metric", 
+               values_to = "Value")
+
+# Creating small multiple plots
+ggplot(plot_data, aes(x = Threshold, y = Value, color = Metric)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ Metric, scales = "free_y") +
+  labs(title = "Total Revenue and Total Count of Credits by Threshold",
+       x = "Threshold",
+       y = "Value") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+
+In the plot of total revenue, largely increasing revenue between 0 and 0.25 threshold, highlighting a critical threshold range for the model's optimization. However, as the threshold increases, the model becomes stricter, potentially reducing the number of predicted participants. 
+
+In th plot of total count of credits, the threshold is low, more homeowners will be predicted to receive credits. As the threshold increases, this count is likely to decrease.  high threshold might minimize marketing costs but could lead to missing out on eligible homeowners who would have benefited from the credit.
+
+
+
+```{r}
+
+# Define the thresholds
+threshold_50 <- 0.5
+optimal_threshold <- 0.25  # Replace with your actual optimal threshold value
+
+
+
+# Filter the results for the specific thresholds
+summary_table <- threshold_results %>%
+  filter(Threshold %in% c(threshold_50, thresholds)) %>%
+  select(Threshold, Total_Revenue, Total_Count_of_Credits)
+
+# Display the table
+kable(summary_table, caption = "Total Revenue and Count of Credits at Different Thresholds") %>%
+  kable_styling()
+
+```
+
+# Conclusion
+
+The model predicting participation in the tax credit program should not be put into production at this time. While it may improve cost-benefit metrics, this does not guarantee that it will enhance decision-making if it inadvertently disenfranchises specific groups. However, the model can evaluate within the appropriate context to ensure equitable outcomes. To enhance its effectiveness, the model requires further refinement, which should include feature engineering and validation against a more diverse dataset. Additionally, optimizing the marketing strategy by tailoring outreach efforts to specific demographics and incorporating feedback mechanisms could significantly improve response rates and overall engagement with the program.
