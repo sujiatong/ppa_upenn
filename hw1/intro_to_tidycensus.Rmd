@@ -1,0 +1,228 @@
+---
+title: "Tidycensus Markdown"
+author: "Jiatong su"
+date: september 5, 2024
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE, cache = TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(pander)
+library(rmarkdown)
+```
+
+# Setup 
+
+Once the packages are installed, you must load them using hte `library` command so that they are active in your environment.
+
+```{r setup_packages2, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+```
+
+## Census API Key
+
+
+```{r load_key, warning = FALSE, eval = FALSE}
+census_api_key("3f9a49c7b9734670b02759f6daeeb5f8c605be14", overwrite=TRUE)
+
+#install = TRUE
+```
+
+## Load census data dictionaries
+
+
+```{r load_variables, cache = TRUE}
+
+acs_variable_list.2020 <- load_variables(2020, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+
+acs_variable_list.2016 <- load_variables(2016, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+```
+
+
+# Downloading Data from Tidycensus
+
+## Create a vector of census variables
+
+```{r acs_vars}
+acs_vars <- c("B01001_001E", # ACS total Pop estimate
+              "B25002_001E", # Estimate of total housing units
+              "B25002_003E", # Number of vacant housing units
+              "B19013_001E", # Median HH Income ($)
+              "B02001_002E", # People describing themselves as "white alone"
+              "B06009_006E") # Total graduate or professional degree
+```
+
+## Call the Census API to get tract level data for 2020 for all of Philadelphia
+
+
+```{r get_acs_2020, cache = TRUE, message = FALSE, warning = FALSE}
+acsTractsPHL.2020 <- get_acs(geography = "tract",
+                             year = 2020, 
+                             variables = acs_vars, 
+                             geometry = FALSE, 
+                             state = "PA", 
+                             county = "Philadelphia", 
+                             output = "wide") 
+```
+# Wrangling Data with dplyr
+## Mutating, selecting and renaming variables
+
+```{r}
+acsTractsPHL.2020 <- acsTractsPHL.2020 %>%
+  dplyr::select (GEOID, NAME, all_of(acs_vars))
+
+acsTractsPHL.2020 <- acsTractsPHL.2020 %>%
+  rename (total_pop.2020 = B01001_001E,
+          total_HU.2020 = B25002_001E,
+          total_vacant.2020 = B25002_003E,
+          med_HH_Income.2020 = B19013_001E,
+          total_White.2020 = B02001_002E,
+          total_GradDeg.2020 = B06009_006E)
+
+acsTractsPHL.2020 <- acsTractsPHL.2020 %>%
+  mutate(vacancyPct.2020 = total_vacant.2020/total_HU.2020,
+         pctWhite.2020   = total_White.2020/total_pop.2020)
+```
+
+```{r}
+acsTractsPHL.2016 <- get_acs(geography = "tract",
+                             year = 2016, 
+                             variables = acs_vars,
+                             geometry = FALSE,
+                             state = "PA", 
+                             county = "Philadelphia",
+                             output = "wide") %>%
+  dplyr::select (GEOID, NAME, all_of(acs_vars)) %>% 
+  rename (total_pop.2016 = B01001_001E,
+          total_HU.2016 = B25002_001E,
+          total_vacant.2016 = B25002_003E,
+          med_HH_Income.2016 = B19013_001E,
+          total_White.2016 = B02001_002E,
+          total_GradDeg.2016 = B06009_006E) %>%
+  mutate(vacancyPct.2016 = total_vacant.2016/total_HU.2016,
+         pctWhite.2016 = total_White.2016/total_pop.2016)
+
+```
+
+# joining data
+```{r}
+allACS <- left_join(acsTractsPHL.2016, acsTractsPHL.2020,
+                    by= c("GEOID"))
+```
+
+
+# Comparing geographies
+
+```{r myTracts, cache = TRUE}
+myTracts <- c("42101023500", 
+              "42101023600", 
+              "42101023700", 
+              "42101025300", 
+              "42101025400",
+              "42101025500", 
+              "42101025600", 
+              "42101038800")
+
+allACS <- allACS %>%
+  mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA"))
+```
+
+
+
+# Graphic comparisons Using ggplot (2a)
+a ggplot plot city-wide - number of vacant housing units per tract in 2020 as a function of vacant housing units in 2016,  (change in raw housing units, so 2020-2016, using "B25002_003E", # Number of vacant housing units", which is part of the `acs_vars` vector). Use the ggplot "color" parameter in the geom_point aesthetics to visualize which are the Mt. Airy tracts.  Annotate this plot with a single sentence describing what it shows (not as a plot title, but within the markdown).
+
+```{r ggplot_point2, warning = FALSE, cache = TRUE, message = FALSE}
+## assign 2(A)
+ggplot(allACS)+
+  geom_point(aes(x = total_vacant.2016, 
+                 y = total_vacant.2020,
+                 color = mtAiry))+
+  geom_abline(intercept = 0, slope = 1)+
+  labs(
+    title = "Vacant housing units in 2020 as a function of vacant housing units in 2016",
+    caption = "Data: US Census Bureau, ACS 5-year estimates",
+    x="total_vacant 2016 ", 
+    y="total_vacant 2020 ")
+  
+```
+
+# Spatial Data and Tidycensus (2b)
+A ggplot map symbolizing the number of vacant housing units in 2016 as a percentage of total housing units (e.g.  "total_HU.2016") on a per-tract basis. Outline the Mt. Airy neighborhood on the map. Annotate this map with a single sentence describing what it shows or implies about Mt Airy and Philadelphia.
+
+```{r spatial_tidycensus, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+acsTractsPHL.2016.sf <- get_acs(geography = "tract",
+                             year = 2016, 
+                             variables = acs_vars, 
+                             geometry = TRUE, 
+                             state = "PA", 
+                             county = "Philadelphia", 
+                             output = "wide") %>% 
+  dplyr::select (GEOID, NAME, all_of(acs_vars)) %>%
+  rename (total_pop.2016 = B01001_001E,
+          total_HU.2016 = B25002_001E,
+          total_vacant.2016 = B25002_003E,
+          med_HH_Income.2016 = B19013_001E,
+          total_White.2016 = B02001_002E,
+          total_GradDeg.2016 = B06009_006E) %>%
+  mutate(vacancyPct.2016 = (total_vacant.2016/total_HU.2016)*100,
+         pctWhite.2016 = total_White.2016/total_pop.2016) %>%
+  mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA")) %>%
+  st_as_sf(crs = 4326) # Turn shp into sf object and project as WGS84
+```
+
+
+```{r ggplot_geom_sf, warning = FALSE, cache = TRUE}
+ggplot()+
+  geom_sf(data = acsTractsPHL.2016.sf, aes(fill = vacancyPct.2016),
+          color = "transparent")+
+  geom_sf(data = acsTractsPHL.2016.sf %>%
+            filter(mtAiry == "MT AIRY") %>%
+            st_union(),
+          color = "white",
+          fill = "transparent")+
+  labs(
+    title = "Percentage of those identifying as 'vacant housing' by tract",
+    subtitle = "",
+    caption = "Data: US Census Bureau, ACS 5-year estimates")
+```
+
+
+# Assignment 2c
+Create a code chunk that renders a "kable" table showing a summary of **mean** number of vacant housing units per tract for Mt. Airy vs. the rest Philadelphia as a whole in 2020.
+```{r}
+#install.packages("kableExtra")
+#devtools::install_github("haozhu233/kableExtra")
+library(kableExtra)
+```
+
+```{r}
+acsTractsPHL.2020 <- acsTractsPHL.2020 %>%
+  mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA"))
+```
+
+```{r}
+summaryTable_2c <- acsTractsPHL.2020 %>%
+  group_by(mtAiry) %>%
+  summarize(mean_vacant = mean(total_vacant.2020, na.rm = TRUE))
+```
+
+```{r}
+dt <- summaryTable_2c 
+dt %>%
+  kable("html") %>%
+  kable_styling()
+```

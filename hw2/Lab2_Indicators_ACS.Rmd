@@ -1,0 +1,822 @@
+---
+title: "Lab 2: Why Start With Indicators?"
+author: "Jiatong su"
+date: '2024-09-12'
+output: html_document
+code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#rm(list = ls())
+
+```
+
+# Load packages and functions
+
+We begin by loading packages, loading our API key etc.,
+
+```{r setup_packages, warning = FALSE, message = FALSE}
+# Load Libraries
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r load_key, warning = FALSE, eval = FALSE}
+census_api_key("d9ebfd04caa0138647fbacd94c657cdecbf705e9", overwrite = TRUE)
+```
+
+### Use `get_acs()` to get 2016 ACS data
+
+```{r}
+tracts12 <-  
+  get_acs(geography = "tract",
+          variables = c("B25026_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E"), 
+          year=2012, state=11,
+          county=001, geometry=TRUE) %>% 
+  st_transform('ESRI:102728')
+```
+
+```{r results='hide'}
+tracts12_long <-  
+  get_acs(geography = "tract",
+          variables = c("B25026_001E","B02001_002E",
+                        "B01001_011E","B01001_012E","B01001_013E","B01001_014E","B01001_015E","B01001_016E","B01001_017E","B01001_018E","B01001_019E","B01001_020E","B01001_021E","B01001_022E","B01001_023E","B01001_024E","B01001_025E",
+                        "B01001_035E","B01001_036E","B01001_037E","B01001_038E","B01001_039E","B01001_040E","B01001_041E","B01001_042E","B01001_043E","B01001_044E","B01001_045E","B01001_046E","B01001_047E","B01001_048E","B01001_049E",
+                        "B15001_017E","B15001_025E","B15001_033E","B15001_041E",
+                        "B15001_058E","B15001_066E","B15001_074E","B15001_082E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E","B25026_001"), 
+          year=2012, state=11,
+          county=001, geometry=TRUE) %>% 
+  st_transform('ESRI:102728')
+```
+
+#### Wide data vs long data (and `spread`vs `gather`)
+
+Let's examine each variable and the elements of an sf object
+
+```{r}
+glimpse(tracts12_long)
+```
+
+We create a new data frame consisting only of population
+
+```{r}
+totalPop12 <-
+  tracts12_long %>%
+  filter(variable == "B25026_001")
+```
+
+![wide vs long
+data](https://github.com/mafichman/musa_5080_2024/blob/main/Week_2/images/tidyr-spread-gather.gif?raw=true)
+
+Image: Garrick Buie
+
+*Why do you think this data type might be useful? Can you name a couple
+of examples?*
+
+### Using ggplot to map census data with {sf} and quantile symbologies
+
+*Exercise: Let's make a few plots by filtering `B25026_001` within a
+ggplot statement and visualizing it. Each plot adds more and more nuance
+and information. Run the code, and examine each to see what we've added
+each time.*
+
+We include a couple of custom functions from our textbook:
+
+*What does `q5` do?*
+
+*What does `qBr` do?*
+
+(Note: the `qBr()` function used here is an update to the one used
+version used in the text book so the results may appear different.)
+
+Plot 1:
+
+```{r}
+ggplot() +
+  geom_sf(data = tracts12_long %>% 
+            filter(variable == "B25026_001"), 
+          #Estimate!!Total population in occupied housing units:
+          aes(fill = estimate)) +
+  theme(
+    plot.title = element_text(size=22)
+    )
+```
+
+Plot 2:
+
+```{r}
+  ggplot() +
+  geom_sf(data = tracts12_long %>% 
+            filter(variable == "B25026_001"),
+          aes(fill = q5(estimate))) +
+  theme(plot.title = element_text(size=22)) 
+```
+
+Plot 3:
+
+```{r}
+ggplot() +
+  geom_sf(data = tracts12_long %>% 
+            filter(variable == "B25026_001"),
+          aes(fill = q5(estimate))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(tracts12 %>% 
+            filter(variable == "B25026_001"), "estimate"),
+                    name = "Total\nPopluation\n(Quintile Breaks)") +
+  theme(plot.title = element_text(size=22))
+```
+
+Plot 4:
+
+```{r}
+ggplot() +
+  geom_sf(data = tracts12_long %>% 
+            filter(variable == "B25026_001"), 
+          aes(fill = q5(estimate))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(tracts12_long %>% 
+            filter(variable == "B25026_001"), "estimate"),
+                    name = "Population\n(Quintile Breaks)") +
+  labs(title = "Total Population", subtitle = "Washington DC; 2012") +
+  mapTheme() + 
+  theme(plot.title = element_text(size=22))
+```
+
+As we can see the map, NW has the densest population, and SW has the
+fewest population.
+
+### Transforming Long Data to Wide Data using spread
+
+Here we will modify the 2016 ACS by using `spread()` to widen the data -
+each census variable is now a column. This looks like the data we had in
+Lab 1.
+
+We will use `rename()` to give sensible names to the columns and we will
+use `mutate()` to make new features out of the existing columns. These
+are all `dplyr` "verbs" we saw in Lab 1, except here we are doing it on
+{sf} spatial data frames.
+
+```{r}
+tracts12_wide <- 
+  tracts12_long %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B25026_001, 
+         Whites = B02001_002,
+         MPop25_29 = B01001_011,
+         MPop30_34 = B01001_012,
+         MPop35_39 = B01001_013,
+         MPop40_44 = B01001_014,
+         MPop45_49 = B01001_015,
+         MPop50_54 = B01001_016,
+         MPop55_59 = B01001_017,
+         MPop60_61 = B01001_018,
+         MPop62_64 = B01001_019,
+         MPop65_66 = B01001_020,
+         MPop67_69 = B01001_021,
+         MPop70_74 = B01001_022,
+         MPop75_79 = B01001_023,
+         MPop80_84 = B01001_024,
+         MPop85_plus = B01001_025,
+         FPop25_29 = B01001_035,
+         FPop30_34 = B01001_036,
+         FPop35_39 = B01001_037,
+         FPop40_44 = B01001_038,
+         FPop45_49 = B01001_039,
+         FPop50_54 = B01001_040,
+         FPop55_59 = B01001_041,
+         FPop60_61 = B01001_042,
+         FPop62_64 = B01001_043,
+         FPop65_66 = B01001_044,
+         FPop67_69 = B01001_045,
+         FPop70_74 = B01001_046,
+         FPop75_79 = B01001_047,
+         FPop80_84 = B01001_048,
+         FPop85_plus = B01001_049,
+         FBach25_34 = B15001_058,
+         FBach35_44 = B15001_066,
+         FBach45_64 = B15001_074,
+         FBach65plus = B15001_082,
+         MBach25_34 = B15001_017,
+         MBach35_44 = B15001_025,
+         MBach45_64 = B15001_033,
+         MBach65plus = B15001_041,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002)
+```
+
+Let's create new rate variables using mutate..
+
+```{r}
+tracts12 <- 
+  tracts12_wide %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         TotalMPop25plus = MPop25_29 + MPop30_34 + MPop35_39 + MPop40_44 + MPop45_49 + MPop50_54 + MPop55_59 + MPop60_61 + MPop62_64 + MPop65_66 + MPop67_69 + MPop70_74 + MPop75_79 + MPop80_84 + MPop85_plus,
+         TotalFPop25plus = FPop25_29 + FPop30_34 + FPop35_39 + FPop40_44 + FPop45_49 + FPop50_54 + FPop55_59 + FPop60_61 + FPop62_64 + FPop65_66 + FPop67_69 + FPop70_74 + FPop75_79 + FPop80_84 + FPop85_plus,
+         TotalPop25plus = TotalMPop25plus + TotalFPop25plus,
+         FemaleBachelors = FBach25_34 + FBach35_44 + FBach45_64 + FBach65plus,
+         MaleBachelors = MBach25_34 + MBach35_44 + MBach45_64 + MBach65plus,
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop25plus), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2012") %>%
+  dplyr::select(GEOID,TotalPop,MedHHInc,MedRent,pctWhite,pctBachelors,pctPoverty,year)
+```
+
+Tracts 2012 is now complete. Let's grab 2024 tracts in "wide" format and
+do the same renaming.
+
+### 2023 Census Data
+
+```{r results='hide'}
+tracts22 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B02001_002E",
+  "B01001_011E","B01001_012E","B01001_013E","B01001_014E","B01001_015E","B01001_016E","B01001_017E","B01001_018E","B01001_019E","B01001_020E","B01001_021E","B01001_022E","B01001_023E","B01001_024E","B01001_025E",
+  "B01001_035E","B01001_036E","B01001_037E","B01001_038E","B01001_039E","B01001_040E","B01001_041E","B01001_042E","B01001_043E","B01001_044E","B01001_045E","B01001_046E","B01001_047E","B01001_048E","B01001_049E",
+  "B15001_017E","B15001_025E","B15001_033E","B15001_041E",
+  "B15001_058E","B15001_066E","B15001_074E","B15001_082E",
+  "B19013_001E", "B25058_001E",
+  "B06012_002E"), 
+          year=2022, 
+          state=11, 
+          county=001, 
+          geometry=TRUE, 
+          output="wide") %>%
+  st_transform('ESRI:102728') %>%
+  rename(TotalPop = B25026_001E, 
+         Whites = B02001_002E,
+         MPop25_29 = B01001_011E,
+         MPop30_34 = B01001_012E,
+         MPop35_39 = B01001_013E,
+         MPop40_44 = B01001_014E,
+         MPop45_49 = B01001_015E,
+         MPop50_54 = B01001_016E,
+         MPop55_59 = B01001_017E,
+         MPop60_61 = B01001_018E,
+         MPop62_64 = B01001_019E,
+         MPop65_66 = B01001_020E,
+         MPop67_69 = B01001_021E,
+         MPop70_74 = B01001_022E,
+         MPop75_79 = B01001_023E,
+         MPop80_84 = B01001_024E,
+         MPop85_plus = B01001_025E,
+         FPop25_29 = B01001_035E,
+         FPop30_34 = B01001_036E,
+         FPop35_39 = B01001_037E,
+         FPop40_44 = B01001_038E,
+         FPop45_49 = B01001_039E,
+         FPop50_54 = B01001_040E,
+         FPop55_59 = B01001_041E,
+         FPop60_61 = B01001_042E,
+         FPop62_64 = B01001_043E,
+         FPop65_66 = B01001_044E,
+         FPop67_69 = B01001_045E,
+         FPop70_74 = B01001_046E,
+         FPop75_79 = B01001_047E,
+         FPop80_84 = B01001_048E,
+         FPop85_plus = B01001_049E,
+         FBach25_34 = B15001_058E,
+         FBach35_44 = B15001_066E,
+         FBach45_64 = B15001_074E,
+         FBach65plus = B15001_082E,
+         MBach25_34 = B15001_017E,
+         MBach35_44 = B15001_025E,
+         MBach45_64 = B15001_033E,
+         MBach65plus = B15001_041E,
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         TotalMPop25plus = MPop25_29 + MPop30_34 + MPop35_39 + MPop40_44 + MPop45_49 + MPop50_54 + MPop55_59 + MPop60_61 + MPop62_64 + MPop65_66 + MPop67_69 + MPop70_74 + MPop75_79 + MPop80_84 + MPop85_plus,
+         TotalFPop25plus = FPop25_29 + FPop30_34 + FPop35_39 + FPop40_44 + FPop45_49 + FPop50_54 + FPop55_59 + FPop60_61 + FPop62_64 + FPop65_66 + FPop67_69 + FPop70_74 + FPop75_79 + FPop80_84 + FPop85_plus,
+         TotalPop25plus = TotalMPop25plus + TotalFPop25plus,
+         FemaleBachelors = FBach25_34 + FBach35_44 + FBach45_64 + FBach65plus,
+         MaleBachelors = MBach25_34 + MBach35_44 + MBach45_64 + MBach65plus,
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop25plus), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2022") %>%
+  dplyr::select(GEOID,TotalPop,MedHHInc,MedRent,pctWhite,pctBachelors,pctPoverty,year)
+```
+
+*What is the value of combining data in this structural form??*
+
+```{r}
+allTracts <- rbind(tracts12,tracts22)
+
+```
+
+### Wrangling Transit Open Data
+
+```{r}
+
+DC_stop <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/52/query?outFields=*&where=1%3D1&f=geojson")
+
+DC_line <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/106/query?outFields=*&where=1%3D1&f=geojson")
+
+#Broad_St <- st_read("https://opendata.arcgis.com/datasets/2e9037fd5bef406488ffe5bb67d21312_0.geojson")
+DC_stop <- st_transform(DC_stop, crs = 'ESRI:102728')
+
+```
+
+```{r}
+library(mapview)
+mapview(DC_stop)
+```
+
+Let's visualize it
+
+```{r}
+#septaStops <- 
+  #rbind(
+     #el %>% 
+      #mutate(Line = "El") %>%
+      #dplyr::select(Station, Line),
+     #Broad_St %>%
+      #mutate(Line ="Broad_St") %>%
+      #dplyr::select(Station, Line)) %>%
+  #st_transform(st_crs(tracts16))  
+
+#this code use to combine
+```
+
+```{r}
+ggplot() + 
+  geom_sf(data=st_union(tracts12)) +
+  geom_sf(data=DC_stop, 
+          #aes(colour = LINE), 
+          show.legend = "point", size= 2) +
+  #scale_colour_manual(values = c("blue","red","orange")) +
+  labs(title="DC_stop", 
+       subtitle="Washington, DC", 
+       caption="Figure 2.5") +
+  mapTheme()
+```
+
+```{r}
+ggplot() + 
+  geom_sf(data=st_union(tracts12)) +
+  geom_sf(data=DC_line, 
+          aes(colour = NAME), 
+          show.legend = "point", size= 2) +
+  scale_colour_manual(values = c("blue","green","orange","red","black","yellow")) +
+  labs(title="DC_line", 
+       subtitle="Washington, DC", 
+       caption="Figure 2.5") +
+  mapTheme()
+```
+
+### Relating SEPTA Stops and Tracts
+
+```{r}
+stopBuffer <- st_buffer(DC_stop, 2640)# 2640 is understood as feet, half mile (2,640 ft.) of stations
+
+stopUnion <- st_union(st_buffer(DC_stop, 2640))
+
+DCBuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+```
+
+Let's examine both buffers by making a "[small
+multiples](https://www.juiceanalytics.com/writing/better-know-visualization-small-multiples)"
+plot. This type of plot shows multiple views of the same data or
+geographic area. We accomplish this by using the `facet_wrap()`
+{ggplot2} function on the *Legend* column.
+
+```{r}
+ggplot() +
+  geom_sf(data=DCBuffers) +
+  geom_sf(data=DC_stop, show.legend = "point") +
+  facet_wrap(~Legend) + 
+  labs(caption = "Figure 2.6", title = "half mile buffers") +
+  mapTheme()
+```
+
+In SE area, there have largest transit stop density, which has many
+Federal building and landmarkin this area. More transit stop in this
+area that convinience for people traveling.
+
+### Using the `sf` Package for Spatial operations
+
+```{r}
+buffer <- filter(DCBuffers, Legend=="Unioned Buffer")
+
+```
+
+
+### Spatial Intersection of tracts and buffers
+
+#### Spatial Clipping with `st_intersection()` on polygons
+
+```{r}
+clip <- 
+  st_intersection(buffer, tracts12) %>%
+  dplyr::select(TotalPop, MedRent) %>%
+  mutate(Selection_Type = "Clip")
+```
+
+#### Spatial intersection with `st_intersects()` on polygons
+
+```{r spatialSelection}
+
+# Do a spatial selection to see which tracts touch the buffer
+
+# approach #1: sub-setting a spatial object with a spatial object using the '[' brackets.
+selection1 <- 
+  tracts12[buffer,] %>%
+  dplyr::select(TotalPop, MedRent) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #2: using `st_intersects` as a verbose way to do approach #1
+selection2 <- tracts12[st_intersects(tracts12, buffer) %>% lengths > 0, ] %>%
+  dplyr::select(TotalPop,MedRent) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #3: use `st_join` to do a spatial join and remove the non-intersecting polygons
+selection3 <- tracts12 %>% 
+  st_join(buffer, join = st_intersects) %>% 
+  filter(!is.na(Legend)) %>% 
+  dplyr::select(TotalPop, MedRent) %>%
+  mutate(Selection_Type = "Spatial Intersects")
+```
+
+
+#### Spatial intersection with with `st_centroid()` on polygon centroids
+
+```{r}
+selectCentroids <-
+  st_centroid(tracts12)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts12, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop, MedRent) %>%
+  mutate(Selection_Type = "Select by Centroids")
+  
+```
+
+summarise(Pop = mean(TotalPop, na.rm = TRUE),
+            Rent = mean(MedRent, na.rm = TRUE))%>%
+
+Let's plot the results of each method to assess.
+
+```{r}
+view(selectCentroids)
+```
+
+```{r}
+intersections <- rbind(clip, selection1, selectCentroids)
+
+ggplot() +
+  geom_sf(data=intersections, aes(fill = TotalPop)) +
+  geom_sf(data=DC_stop, show.legend = "point") +
+  scale_fill_viridis_c() +
+  facet_wrap(~Selection_Type) + 
+  mapTheme()
+
+```
+
+```{r}
+selectCentroids_12 <-
+  st_centroid(tracts12)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts12, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  group_by() %>%
+   summarise(Pop = mean(TotalPop, na.rm = TRUE),
+            Rent = mean(MedRent, na.rm = TRUE)) %>%
+  dplyr::select(Pop, Rent) %>%
+  mutate(lon = st_coordinates(geometry)[,1],
+         lat = st_coordinates(geometry)[,2])
+
+#resulting to station
+#DC_centroid <- cbind(DCBuffers, selectCentroids_12) 
+```
+```{r}
+ # Spatial join: Find the intersection between buffers and tracts
+buffer_population <- st_intersection(stopBuffer, tracts12)
+
+# Calculate the population within each buffer by summing the population in intersecting tracts
+buffer_population_summary <- st_sf(buffer_population ) %>%
+  st_centroid() %>%
+    mutate(lon = st_coordinates(geometry)[,1],
+         lat = st_coordinates(geometry)[,2])
+
+```
+
+```{r}
+ggplot() +
+  geom_sf(data=allTracts,show.legend = "point") +
+  #geom_sf(data= buffer_population_summary, aes(fill = total_population)) +
+  geom_point(data = buffer_population_summary,
+             aes(x= lon,
+                 y= lat,
+                 size = TotalPop),
+             color = "purple", alpha = 0.5)  +
+  scale_fill_viridis_c() +
+  #facet_wrap(~Selection_Type) + 
+  labs(title = "population and half mile buffers of each Metro station") +
+  mapTheme()
+    
+```
+
+
+
+```{r}
+ggplot() +
+  geom_sf(data=allTracts,show.legend = "point") +
+  geom_sf(data= buffer_population_summary,aes(fill = Rent)) +
+    geom_sf(data = DC_stop,
+          fill = alpha("red", 0.7),
+          col = "grey20")+
+    scale_fill_manual(values = palette5,labels = qBr(buffer_population_summary, "Rent"),
+                    name = "Rent\n(Quintile Breaks)") +
+  scale_fill_viridis_c() +
+  #facet_wrap(~Selection_Type) + 
+  labs(title = "Rent and half mile buffers of each Metro station") +
+  mapTheme()
+```
+
+
+```{r}
+ggplot(myData)+
+  geom_point(data = st_union(tracts12))+
+  geom_sf(aes(fill = q5(TotalPop))) +
+  geom_sf(data = DC_stop,
+          fill = alpha("red", 0.7),
+          col = "grey20")+
+  scale_fill_manual(values = palette5,
+                    labels = qBr(myData, "TotalPop"),
+                    name = "Popluation\n(Quintile Breaks)") +
+  labs(title = "Total Population", subtitle = "DC; 2012") +
+  facet_wrap(~Selection_Type)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=22))
+```
+
+
+```{r}
+ggplot() +
+  geom_sf(data=allTracts,show.legend = "polygon") +
+  geom_sf(data= intersections, show.legend = "polygon", aes(fill = MedRent)) +
+  scale_fill_viridis_c() +
+  facet_wrap(~Selection_Type) + 
+  labs(title = "Rent and half mile buffers of each Metro station") +
+  mapTheme()
+```
+
+```{r}
+ggplot(myData)+
+  geom_sf(data = st_union(tracts12))+
+  geom_sf(aes(fill = q5(MedRent))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(myData, "MedRent"),
+                    name = "Popluation\n(Quintile Breaks)") +
+  labs(title = "Mean Rent", subtitle = "DC; 2012") +
+  facet_wrap(~Selection_Type)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=22))
+```
+
+### Indicator Maps
+
+```{r}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.14, MedRent)) 
+
+```
+
+```{r}
+ggplot() +
+  #geom_sf(data=allTracts,show.legend = "polygon") +
+  geom_sf(data= allTracts.group,  aes(color = TOD)) +
+  #scale_color_discrete(name = "TOD") +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) + 
+  labs(title = "time and space (TOD vs. non-TOD)") +
+  mapTheme()
+
+```
+
+```{r}
+  ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = TOD)) +
+    labs(title = "Time/Space Groups") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=22))
+```
+
+```{r}
+  ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = q5(MedRent.inf))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red")+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "MedRent.inf"),
+                      name = "Rent\n(Quintile Breaks)") +
+    labs(title = "Median Rent 2012-2022", subtitle = "Real Dollars") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=22))
+```
+
+*Can you try to create the small multiple indicator maps seen in the
+text? The solutions are contained in "map_exercise.R"*
+
+## Appendices - More Code For Completing Assignment 2
+
+### TOD Indicator Tables
+
+Your homework will require you to make indicator tables comparing TOD
+and non TOD areas over time. These code blocks create the tables you see
+in the book and in lecture.
+
+```{r}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            Percent_White = mean(pctWhite, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+
+kable(allTracts.Summary) %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Table 2.2")
+```
+
+Let's make some comparisons and speculate about the willingness to pay
+and demographics in these areas 2016-2020 (see the 2000 data in the text
+too)
+
+Notice how we pipe the kable() command here
+
+```{r}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Table 2.3")
+```
+
+### TOD Indicator Plots
+
+```{r}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Variable, scales = "free", ncol=5) +
+  scale_fill_manual(values = c("#bae4bc", "#0868ac")) +
+  labs(title = "Indicator differences across time and space" )+
+  plotTheme() + 
+  theme(legend.position="bottom")
+```
+
+
+
+
+```{r}
+allTracts.DCBuffers <-
+  st_join(st_centroid(allTracts), DCBuffers) %>%
+  st_drop_geometry() %>%
+  left_join(allTracts) %>%
+  #mutate(Submarket = replace_na(Submarket, "Non-TOD")) %>%
+  st_sf() 
+```
+```{r}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.42, MedRent)) 
+```
+
+#### Example of using `multipleRingBuffer()` function
+
+Create a geom_line plot that shows mean rent as a function of distance
+to subway stations (Figure 1.17). To do this you will need to use the
+multipleRingBuffer function found in the functions.R script. Check out
+the MRB_Explained markdown on Canvas for more info on how this works!
+
+```{r}
+DC_stop_MRB <- multipleRingBuffer(st_union(DC_stop),
+                                maxDistance = 47520,
+                                interval =  2640)
+```
+
+```{r}
+allTracts.rings <-
+  st_join(st_centroid(dplyr::select(allTracts, GEOID, year)), 
+          multipleRingBuffer(st_union(DC_stop), 47520, 2640)) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+```
+
+```{r}
+ggplot() +
+    geom_sf(data=DC_stop_MRB) +
+    geom_sf(data=DC_stop, size=1) +
+    geom_sf(data=st_union(tracts22), fill=NA, size=1.2) +
+    labs(title="Half mile buffers") +
+    mapTheme()
+
+```
+
+
+```{r}
+ggplot() +
+    geom_sf(data=DC_stop_MRB) +
+    geom_sf(data=DC_stop, size=1) +
+   geom_sf(data=allTracts, aes(fill = TotalPop)) +
+    labs(title="Half mile buffers") +
+  
+    mapTheme()
+
+```
+
+```{r}
+allTracts.rings <- allTracts %>% 
+  select(GEOID, year) %>% 
+  st_centroid() %>% 
+  st_join(DC_stop_MRB, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+```
+
+```{r}
+allTracts.rings.summary <- st_drop_geometry(allTracts.rings) %>%
+    group_by(distance, year) %>%
+    summarize(Mean_Rent = mean(MedRent, na.rm=T))
+```
+
+```{r}
+ggplot(allTracts.rings.summary,
+       aes(distance, Mean_Rent, colour=year)) +
+      geom_point(size=3) + 
+  labs(title="Rent as function of distance to Metro station") +
+  geom_line(size=2)
+```
+
+Comparing two different year, the rent have increasing around 1k during
+last ten years. However, there has been no significant change in the
+relationship between rent and distance to Metro stations.

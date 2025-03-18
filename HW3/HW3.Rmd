@@ -1,0 +1,595 @@
+---
+title: "HW3 - Geospatial Risk Prediction"
+author: "Jiatong Su"
+output:
+  html_document:
+    theme: simplex
+    toc: yes
+    toc_float: yes
+    progress: hide
+    code_folding: hide
+    code_download: yes
+  params:
+  include_warnings: false  # Add this line to suppress warnings
+  
+editor_options:
+  markdown:
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+
+library(tidyverse)
+library(sf)
+library(RSocrata)
+library(viridis)
+library(spatstat.explore)
+library(raster)
+library(spdep)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(classInt)   # for KDE and ML risk class intervals
+# functions
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+
+```
+
+# Introduction
+
+This assignment aims to explore assault counts in Boston.
+The primary outcome of interest is the Aggravated Assault, a critical measure for public safety.
+Moreover, incorporates two additional features as predictors, which are **Auto Theft** and **Warrant Arrests,** whichenhance the prediction of assault occurrences.
+These variables are connected to criminal activity patterns and may serve as key indicators of areas with higher assault risks.
+
+However, bias is an important concern in this analysis because different crimes can lead to increasing assaults in the same area.
+This phenomenon occurs because various crimes can share common underlying factors or circumstances that drive certain areas more prone to multiple types of criminal activity.
+Therefore, the predictor variables may naturally cluster in areas already experiencing higher assault rates.
+
+# Read in Data from Boston
+
+```{r, echo=FALSE, results='hide'}
+nhoods <- 
+  st_read("https://raw.githubusercontent.com/mafichman/musa_5080_2024/main/Week_4/neighborhoods/bost_nhoods.geojson") %>%
+  st_transform('ESRI:102286')
+
+boston <- 
+  read.csv(file.path(root.dir,"/Chapter3_4/bostonHousePriceData_clean.csv"))
+
+bostonCrimes <- read.csv(file.path(root.dir,"/Chapter3_4/bostonCrimes.csv")) 
+```
+
+The code block below selects only "Aggravated Assault".
+
+```{r}
+
+bostonCrimes.sf <- bostonCrimes %>%
+    filter(OFFENSE_CODE_GROUP == "Aggravated Assault",
+           Lat > -1) %>%
+    dplyr::select(Lat, Long) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("Long", "Lat"), crs = "EPSG:4326") %>%
+    st_transform('ESRI:102286') %>%
+    distinct()
+
+Assault_2015 <-
+  bostonCrimes %>%
+  filter(str_detect(OCCURRED_ON_DATE, "2015")) %>% 
+    filter(OFFENSE_CODE_GROUP == "Aggravated Assault",
+           Lat > -1) %>%
+    dplyr::select(Lat, Long) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("Long", "Lat"), crs = "EPSG:4326") %>%
+    st_transform('ESRI:102286') %>%
+    distinct()
+
+Assault_2016 <-
+  bostonCrimes %>%
+  filter(str_detect(OCCURRED_ON_DATE, "2016")) %>% 
+    filter(OFFENSE_CODE_GROUP == "Aggravated Assault",
+           Lat > -1) %>%
+    dplyr::select(Lat, Long) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("Long", "Lat"), crs = "EPSG:4326") %>%
+    st_transform('ESRI:102286') %>%
+    distinct()
+
+
+```
+
+# visualizing point data
+
+The following plot visualize the point and density map of Aggravated Assault.
+
+```{r}
+grid.arrange(ncol=2,
+ggplot() + 
+  geom_sf(data = nhoods) +
+  geom_sf(data = Assault_2015, colour="red", size=0.1, show.legend = "point") +
+  labs(title= "Aggravated Assault, Boston") +
+  mapTheme(title_size = 14),
+
+ggplot() + 
+  geom_sf(data = nhoods, fill = "grey40") +
+  stat_density2d(data = data.frame(st_coordinates(Assault_2015)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..),
+                 size = 0.01, bins = 40, geom = 'polygon') +
+  scale_fill_viridis() +
+  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  labs(title = "Density of ASSAULT ") +
+  mapTheme(title_size = 14) + theme(legend.position = "none"))
+```
+
+These maps visualize a clear concentration of assaults on the western and southern sides of Boston.
+The points indicate areas with higher occurrences, suggesting a potential need for targeted intervention and resource allocation.
+The density map emphasizes these regions, highlighting patterns that may correlate with underlying socioeconomic factors or other neighborhood characteristics.
+
+# Creating a fishnet grid
+
+```{r}
+fishnet <- 
+  st_make_grid(nhoods,
+               cellsize = 500, 
+               square = TRUE) %>%
+  .[nhoods] %>%            # fast way to select intersecting polygons
+  st_sf() %>%
+  mutate(uniqueID = 1:n())
+
+## add a value of 1 to each crime, sum them with aggregate
+crime_net <- 
+  dplyr::select(Assault_2015) %>% 
+  mutate(countASSAULT = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(countASSAULT = replace_na(countASSAULT, 0),
+         uniqueID = 1:n(),
+         cvID = sample(round(nrow(fishnet) / 24), 
+                       size=nrow(fishnet), replace = TRUE))
+
+ggplot() +
+  geom_sf(data = crime_net, aes(fill = countASSAULT), color = NA) +
+  scale_fill_viridis() +
+  labs(title = "Count of Aggravated Assault for the fishnet") +
+  mapTheme()
+```
+
+The fishnet map calculates the density of points, which reveal assualt within each gird cell.
+Obivously, we can assault happening cluter in middle side, which is effciency to observe spatial patterns acrross a Boston.
+
+# Wrangling risk factors
+
+Importing Auto theft and Warrant Arrests as risk factors, which use for predicting Assault.
+
+```{r}
+bostonAutoTheft <-
+  bostonCrimes %>%
+    filter(str_detect(OCCURRED_ON_DATE, "2015")) %>% 
+    filter(OFFENSE_CODE_GROUP == "Auto Theft",
+           Lat > -1) %>% 
+    dplyr::select(Lat, Long) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("Long", "Lat"), crs = "EPSG:4326", agr = "constant") %>%
+    st_transform('ESRI:102286') %>%
+    distinct() %>% 
+    mutate(Legend = "AutoTheft")
+
+
+bostonWarrantArrests	 <-
+  bostonCrimes %>%
+    filter(str_detect(OCCURRED_ON_DATE, "2015")) %>% 
+    filter(OFFENSE_CODE_GROUP == "Warrant Arrests",
+           Lat > -1) %>%
+    dplyr::select(Lat, Long) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("Long", "Lat"), crs = "EPSG:4326") %>%
+    st_transform('ESRI:102286') %>%
+    distinct() %>% 
+    mutate(Legend = "WarrantArrests")
+```
+
+# Nearest Neighbor Feature
+
+In the following code, Calculating average nearest neighbor distance hypothesize a exposure relationship across Boston.
+Average nearest neighbor features are built by `var_net` grid cells to centroid points then measuring to k risk factor points.
+In term of denmostration purposes k is set to 3.
+
+```{r}
+vars_net <- 
+  rbind(bostonAutoTheft, bostonWarrantArrests) %>%
+  st_join(., fishnet, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+    full_join(fishnet) %>%
+    spread(Legend, count, fill=0) %>%
+    st_sf() %>%
+    dplyr::select(-`<NA>`) %>%
+    na.omit() %>%
+    ungroup()
+
+vars_net <- vars_net %>%
+  mutate(
+    AutoTheft.nn = nn_function(st_coordinates(st_centroid(vars_net)),
+                                st_coordinates(bostonAutoTheft), 
+                                k = 3),
+    WarrantArrests.nn = nn_function(st_coordinates(st_centroid(vars_net)),
+                                st_coordinates(bostonWarrantArrests), 
+                                k = 3))
+
+
+vars_net.long <- 
+  gather(vars_net, Variable, value, -geometry, -uniqueID)
+
+vars <- unique(vars_net.long$Variable)
+mapList <- list()
+
+for(i in vars){
+  mapList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(vars_net.long, Variable == i), aes(fill=value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme()}
+
+do.call(grid.arrange,c(mapList, ncol=3, top="Risk Factors by Fishnet"))
+```
+
+```{r}
+final_net <-
+  left_join(crime_net, st_drop_geometry(vars_net), by="uniqueID") 
+
+final_net <-
+  st_centroid(final_net) %>%
+    st_join(dplyr::select(nhoods, neighborhood), by = "uniqueID") %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(final_net, geometry, uniqueID)) %>%
+      st_sf() %>%
+  na.omit()
+
+final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
+
+final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
+
+
+local_morans <- localmoran(final_net$countASSAULT, final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+# join local Moran's I results to fishnet
+final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(ASSAULT_Count = countASSAULT, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+vars <- unique(final_net.localMorans$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(final_net.localMorans, Variable == i), 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 4, top = "Local Morans I statistics, countASSAULT"))
+```
+
+Local Moran’s I is a measure of spatial autocorrelation that helps identify clusters or outliers in a dataset.
+In the following analyzing, using “Local Moran's I” learn how assault rates are spatially organized, and how factors like neighborhood context and surrounding crime rates impact the clustering or dispersion of assaults.
+
+These plots display some important information about the assault.
+For example, **Local Moran’s I map** demonstrates assault clustering concentrated in the middle part of Boston.
+Moreover, the P-value is smaller than 0.01, meaning that isstatistically significant and indicates higher assault, and vice versa in higher p-value means lower assault.
+Lastly, aSignificant hotspot map displays assault distribution based on the local moran's I, showing assault concentration in the middle part of Boston.
+
+`countASSAULT.isSig`, denotes a cell as part of a significant cluster (a p-value \<= 0.001).
+`countASSAULT.isSig.dist` then measures average nearest neighbor distance from each cell centroid to its nearest significant cluster.
+Now, the following analysis model significant information on the local spatial process of ASSAULT.
+
+```{r}
+# generates warning from NN
+final_net <- final_net %>% 
+  mutate(countASSAULT.isSig = 
+           ifelse(local_morans[,5] <= 0.001, 1, 0)) %>%
+  mutate(countASSAULT.isSig.dist = 
+           nn_function(st_coordinates(st_centroid(final_net)),
+                       st_coordinates(st_centroid(filter(final_net, 
+                                           countASSAULT.isSig == 1))), 
+                       k = 1))
+
+ggplot() +
+      geom_sf(data = final_net, aes(fill=countASSAULT.isSig.dist), colour=NA) +
+      scale_fill_viridis(name="countASSAULT.isSig.dist") +
+      labs(title="countASSAULT of distance to highly significat hotspot") +
+      mapTheme()
+```
+
+These plots display some important information about the assault.
+For example, Local Moran’s I map demonstrates assault clustering concentrated in the middle part of Boston.
+Moreover, the P-value is smaller than 0.01, meaning that is statistically significant and indicates higher assault, and vice versa in higher p-value means lower assault.
+Lastly, a Significant hotspot map displays assault distribution based on the local moran's I, showing assault concentration in the middle part of Boston.
+
+# Correlative analysis
+
+Correlation provide significant context on features that may predict `countASSAULT`.
+
+```{r}
+correlation.long <-
+  st_drop_geometry(final_net) %>%
+    dplyr::select(-uniqueID, -cvID, -neighborhood) %>%
+    gather(Variable, Value, -countASSAULT)
+
+correlation.cor <-
+  correlation.long %>%
+    group_by(Variable) %>%
+    summarize(correlation = cor(Value, countASSAULT, use = "complete.obs"))
+    
+ggplot(correlation.long, aes(Value, countASSAULT)) +
+  geom_point(size = 0.1) +
+  geom_text(data = correlation.cor, aes(label = paste("r =", round(correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~Variable, ncol = 2, scales = "free") +
+  labs(title = "ASSAULT count as a function of risk factors") +
+  plotTheme()
+```
+
+The correlation plots display the relationship between risk factors and Assault.
+Risk factors are organized by count and nearest neighbor (nn_function), so the resulting factor of nearest neighbor is quite awkward. 
+
+# modeling and cv
+
+The folowing function runs a poisson model AND does a cross-validation process.
+If we specify “name” (which is our neighborhood) it trains on all but one holdout neighborhood (or “fold”) and tests the model on geographic holdout sets.
+It returns an sf object, in this case called reg.ss.spatialCV.
+This is a purely results-oriented process - engineering on the front end and predictions on the back end.
+
+```{r, echo=FALSE, results='hide'}
+
+reg.ss.vars <- c( "AutoTheft.nn", "WarrantArrests.nn", "countASSAULT.isSig", "countASSAULT.isSig.dist")
+
+reg.vars <- c ( "AutoTheft.nn",  "WarrantArrests.nn")
+final_net<-st_as_sf(final_net)
+
+
+reg.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countASSAULT",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = cvID, countASSAULT, Prediction, geometry)
+
+reg.ss.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countASSAULT",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = cvID, countASSAULT, Prediction, geometry)
+
+reg.ss.spatialCV <- crossValidate(
+  dataset = final_net ,
+  id = "neighborhood",                           
+  dependentVariable = "countASSAULT",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = neighborhood, countASSAULT, Prediction, geometry)
+
+reg.spatialCV <- crossValidate(
+  dataset = final_net ,
+  id = "neighborhood",                           
+  dependentVariable = "countASSAULT",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = neighborhood, countASSAULT, Prediction, geometry)
+
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,           Error = Prediction - countASSAULT,
+                             Regression = "Random k-fold CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.cv,        Error = Prediction - countASSAULT,
+                             Regression = "Random k-fold CV: Spatial Process"),
+    
+    mutate(reg.spatialCV,    Error = Prediction - countASSAULT,
+                             Regression = "Spatial LOGO-CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.spatialCV, Error = Prediction - countASSAULT,
+                             Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+
+
+```
+
+```{r}
+error_by_reg_and_fold <- 
+   reg.summary %>%
+    group_by(Regression, cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countASSAULT, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+
+
+## plot histogram of OOF (out of fold) errors
+error_by_reg_and_fold %>%
+  ggplot(aes(MAE)) + 
+    geom_histogram(bins = 30, colour="black", fill = "#FDE725FF") +
+  facet_wrap(~Regression) +  
+  scale_x_continuous(breaks = seq(0, 11, by = 1)) + 
+    labs(title="Distribution of MAE", subtitle = "LOGO-CV",
+         x="Mean Absolute Error", y="Count") +
+  plotTheme()
+
+```
+
+MAE calculates the difference between the actual value and the predicted value.
+In this context, a lower MAE value means the model is good, and vice versa a larger MAE value suggests the model provides less accurate predictions.
+
+Regarding the MAE plots, the random k-fold CV has promising results, with most MAE values clustering near 0, indicating a relatively good fit across the Assault count.
+In contrast, The MAE of spatial LOGO-CV exhibits more dispersed MAE values, suggesting a less consistent goodness fit.
+
+```{r}
+st_drop_geometry(error_by_reg_and_fold) %>%
+  group_by(Regression) %>% 
+    summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable() %>%
+    kable_styling("striped", full_width = F) %>%
+  row_spec(2, color = "black", background = "#FDE725FF") %>%
+  row_spec(4, color = "black", background = "#FDE725FF") 
+```
+
+This table builds on `error_by_reg_and_fold` to calculate the mean and standard deviation in errors by regression.
+Random k-fold CV has lower MAE value, indicating has relativeily good prediction.
+Moreover, Spatial LOGO-CV has larger MAE value, suggesting model prediction is less accurate.
+
+```{r}
+error_by_reg_and_fold %>%
+ filter(str_detect(Regression, "LOGO")) %>%
+  ggplot() +
+    geom_sf(aes(fill = MAE)) +
+    facet_wrap(~Regression) +
+    scale_fill_viridis() +
+    labs(title = "ASSAULT errors by LOGO-CV Regression") +
+    mapTheme() + theme(legend.position="bottom")
+
+```
+
+These map displays LOGO-CV MAE value spatially.
+The largest error are in the hotspot area.
+
+# Final test
+
+In this section, utilizing next year Assault data(2016) compare previous year Assault data.
+
+Moreover, summarizing the KDE values into a fishnet and then break them into five classes, which highest incident frequency being “Risk Category == 1” and the lowest incident frequency being “Risk Category == 5".
+
+```{r}
+ASSAULT_ppp <- as.ppp(st_coordinates(Assault_2015), W = st_bbox(final_net))
+ASSAULT_KD.1000 <- spatstat.explore::density.ppp(ASSAULT_ppp, 1000)
+ASSAULT_KD.1500 <- spatstat.explore::density.ppp(ASSAULT_ppp, 1500)
+ASSAULT_KD.2000 <- spatstat.explore::density.ppp(ASSAULT_ppp, 2000)
+ASSAULT_KD.df <- rbind(
+  mutate(data.frame(rasterToPoints(mask(raster(ASSAULT_KD.1000), as(nhoods, 'Spatial')))), Legend = "1000 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(ASSAULT_KD.1500), as(nhoods, 'Spatial')))), Legend = "1500 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(ASSAULT_KD.2000), as(nhoods, 'Spatial')))), Legend = "2000 Ft.")) 
+
+ASSAULT_KD.df$Legend <- factor(ASSAULT_KD.df$Legend, levels = c("1000 Ft.", "1500 Ft.", "2000 Ft."))
+
+
+Assault_2016 <- Assault_2016 %>% 
+    .[fishnet,]
+
+Assault_KDE_sum <- as.data.frame(ASSAULT_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) 
+
+kde_breaks <- classIntervals(Assault_KDE_sum$value, 
+                             n = 5, "fisher")
+
+
+Assault_KDE_sf <- Assault_KDE_sum %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = classInt::findCols(kde_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(Assault_2016) %>% mutate(assaultCount = 1), ., sum) %>%
+    mutate(assaultCount = replace_na(assaultCount, 0))) %>%
+  dplyr::select(label, Risk_Category, assaultCount)
+
+
+ml_breaks <- classIntervals(reg.ss.spatialCV$Prediction, 
+                             n = 5, "fisher")
+Assault_risk_sf <-
+  reg.ss.spatialCV %>%
+  mutate(label = "Risk Predictions",
+         Risk_Category =classInt::findCols(ml_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(Assault_2016) %>% mutate(assaultCount = 1), ., sum) %>%
+      mutate(assaultCount = replace_na(assaultCount, 0))) %>%
+  dplyr::select(label,Risk_Category, assaultCount)
+
+
+
+
+```
+
+```{r}
+
+rbind(Assault_KDE_sf, Assault_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+geom_sf(data = sample_n(Assault_2016, 3000, replace = TRUE), size = .5, colour ="black", alpha = 0.3) +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2015 assault risk predictions; 2016 assault") +
+    mapTheme(title_size = 14)
+
+```
+
+A strongly fit model would represents that the highest risk category is effectively targeted to area with a high density of observed assaults.
+
+However, in cases where a **high-risk category** is mapped to locations with **few 2016 assault points**, it may suggest either a **latent risk** (areas that are vulnerable but have not yet experienced assaults) or indicate **lower model accuracy** in predicting actual assault occurrences.
+
+Overall, the 2016 assault points generally align well with both the **kernel density estimates** and the **risk predictions**, supporting the validity of the model's predictions in most areas.
+
+```{r}
+rbind(Assault_KDE_sf, Assault_risk_sf) %>%
+  st_drop_geometry() %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(countAssault = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Pcnt_of_test_set_crimes = countAssault / sum(countAssault)) %>%
+    ggplot(aes(Risk_Category,Pcnt_of_test_set_crimes)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(discrete = TRUE, name = "Model") +
+      labs(title = "Risk prediction vs. Kernel density, 2016 assaualt",
+           y = "% of Test Set Assualt (per model)",
+           x = "Risk Category") +
+  theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+This histogram displays the portions of each risk category with Kernel density and risk predictions.
+An accuracy model should show displays that the risk predictions capture a larger share of 2016 assault in the highest risk category relative to the kernel density.
+
+In general, the risk prediction is larger than kernel density, which means the model result is accurate.
+However, the risk prediction is lower than kernel density in the 5th risk category, representing the result model is less accurate.
+
+# Conclusion
+
+Throughout the analysis, the result of the model displays potential in emphasizing high-risk areas, but its predictive accuracy may not be consistent across all locations, especially where high-risk categories are identified while few actual crimes are observed.
+This suggests a need for further refinement before the model can reliably be used for feature predictors. 
+
+Even though the algorithm may not be appropriate for crime prediction, the algorithm would provide some valuable insight for the local police. 
+For example, throughout the analysis, the models reveal important correlations between features in the spatial process, emphasizing patterns or factors that could influence crime occurrences. 
+This can help police departments better understand the spatial dynamics of crime and make more informed decisions on resource allocation and intervention strategies.
+Therefore, I would recommend my algorithm to the local government.

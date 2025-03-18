@@ -1,0 +1,458 @@
+---
+title: "Transit-Oriented Development"
+author: "Jiatong su"
+date: september 20, 2024
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+# Introduction
+
+"Do households **value transit-rich neighborhoods** compared to others?"
+
+In American culture, most households rely on automobiles for commuting, so car ownership remains high among many US households. However, Transit-Oriented Development(TOD) aims to enhance mobility by reducing car reliance, which promotes access to public transit and increases walkability. This approach supports sustainable urban growth and helps to reduce traffic congestion issues. Therefore, more households increasingly are willing to live in transit-rich neighborhoods for commuting due to the affordable transportation costs, time savings, and sustainability.
+
+In the following research analysis, the DC metro station defines the TOD area while combining the census data to analyze distribution, which focusing population, rent, poverty, and Aggregate number of vehicles commuting factors. Washington DC is the capital of the United States, which includes extensive federal buildings and tourist attractions. Comparing another city in the US, DC has a relatively efficient transit system. The goal of research analysis is to analyze the pattern between non-TOD and TOD areas, which try to find potential associations between the factors.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#rm(list = ls())
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(gridExtra)
+options(scipen=999)
+options(tigris_class = "sf")
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r pressure, echo=FALSE}
+census_api_key("d9ebfd04caa0138647fbacd94c657cdecbf705e9", overwrite = TRUE)
+#load api key
+```
+
+
+```{r, include=FALSE}
+tracts12 <-  
+  get_acs(geography = "tract",
+          variables = c("B25026_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E", "B25058_001E",
+                        "B06012_002E",
+                        "B08015_001E"
+                        ), 
+          year=2012, state=11,
+          county=001, geometry=TRUE) %>% 
+  st_transform('ESRI:102728') %>% 
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(TotalPop = B25026_001, 
+         Whites = B02001_002,
+         FemaleBachelors = B15001_050, 
+         MaleBachelors = B15001_009,
+         MedHHInc = B19013_001, 
+         MedRent = B25058_001,
+         TotalPoverty = B06012_002,
+         Aggregate_num_vehicles_commuting = B08015_001
+         ) %>% 
+   mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2012") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+```
+
+```{r, include=FALSE}
+tracts22 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B02001_002E",
+  "B01001_011E","B01001_012E","B01001_013E","B01001_014E","B01001_015E","B01001_016E","B01001_017E","B01001_018E","B01001_019E","B01001_020E","B01001_021E","B01001_022E","B01001_023E","B01001_024E","B01001_025E",
+  "B01001_035E","B01001_036E","B01001_037E","B01001_038E","B01001_039E","B01001_040E","B01001_041E","B01001_042E","B01001_043E","B01001_044E","B01001_045E","B01001_046E","B01001_047E","B01001_048E","B01001_049E",
+  "B15001_017E","B15001_025E","B15001_033E","B15001_041E",
+  "B15001_058E","B15001_066E","B15001_074E","B15001_082E",
+  "B19013_001E", "B25058_001E",
+  "B06012_002E","B08015_001E"), 
+          year=2022, 
+          state=11, 
+          county=001, 
+          geometry=TRUE, 
+          output="wide") %>%
+  st_transform('ESRI:102728') %>%
+  rename(#Aggregate_num_vehicles_commuting = B08015_001E,
+         TotalPop = B25026_001E, 
+         Whites = B02001_002E,
+         MPop25_29 = B01001_011E,
+         MPop30_34 = B01001_012E,
+         MPop35_39 = B01001_013E,
+         MPop40_44 = B01001_014E,
+         MPop45_49 = B01001_015E,
+         MPop50_54 = B01001_016E,
+         MPop55_59 = B01001_017E,
+         MPop60_61 = B01001_018E,
+         MPop62_64 = B01001_019E,
+         MPop65_66 = B01001_020E,
+         MPop67_69 = B01001_021E,
+         MPop70_74 = B01001_022E,
+         MPop75_79 = B01001_023E,
+         MPop80_84 = B01001_024E,
+         MPop85_plus = B01001_025E,
+         FPop25_29 = B01001_035E,
+         FPop30_34 = B01001_036E,
+         FPop35_39 = B01001_037E,
+         FPop40_44 = B01001_038E,
+         FPop45_49 = B01001_039E,
+         FPop50_54 = B01001_040E,
+         FPop55_59 = B01001_041E,
+         FPop60_61 = B01001_042E,
+         FPop62_64 = B01001_043E,
+         FPop65_66 = B01001_044E,
+         FPop67_69 = B01001_045E,
+         FPop70_74 = B01001_046E,
+         FPop75_79 = B01001_047E,
+         FPop80_84 = B01001_048E,
+         FPop85_plus = B01001_049E,
+         FBach25_34 = B15001_058E,
+         FBach35_44 = B15001_066E,
+         FBach45_64 = B15001_074E,
+         FBach65plus = B15001_082E,
+         MBach25_34 = B15001_017E,
+         MBach35_44 = B15001_025E,
+         MBach45_64 = B15001_033E,
+         MBach65plus = B15001_041E,
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalPoverty = B06012_002E,
+         Aggregate_num_vehicles_commuting =B08015_001E
+         ) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         TotalMPop25plus = MPop25_29 + MPop30_34 + MPop35_39 + MPop40_44 + MPop45_49 + MPop50_54 + MPop55_59 + MPop60_61 + MPop62_64 + MPop65_66 + MPop67_69 + MPop70_74 + MPop75_79 + MPop80_84 + MPop85_plus,
+         TotalFPop25plus = FPop25_29 + FPop30_34 + FPop35_39 + FPop40_44 + FPop45_49 + FPop50_54 + FPop55_59 + FPop60_61 + FPop62_64 + FPop65_66 + FPop67_69 + FPop70_74 + FPop75_79 + FPop80_84 + FPop85_plus,
+         TotalPop25plus = TotalMPop25plus + TotalFPop25plus,
+         FemaleBachelors = FBach25_34 + FBach35_44 + FBach45_64 + FBach65plus,
+         MaleBachelors = MBach25_34 + MBach35_44 + MBach45_64 + MBach65plus,
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop25plus), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2022") %>%
+  dplyr::select(GEOID,TotalPop,MedHHInc,MedRent,pctWhite,pctBachelors,pctPoverty,
+                Aggregate_num_vehicles_commuting,year)
+```
+
+## Getting Metro station in DC
+
+-   [Metro stations in DC](https://opendata.dc.gov/datasets/54018b7f06b943f2af278bbe415df1de_52/explore)
+-   [Metro Lines in DC](https://opendata.dc.gov/datasets/DCGIS::metro-lines-in-dc/about)
+
+```{r}
+DC_stop <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/52/query?outFields=*&where=1%3D1&f=geojson") %>%
+  st_transform('ESRI:102728')
+DC_line <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/106/query?outFields=*&where=1%3D1&f=geojson") %>%
+  st_transform('ESRI:102728')
+```
+
+```{r}
+ggplot() + 
+  geom_sf(data=st_union(tracts12)) +
+  geom_sf(data=DC_stop, 
+          show.legend = "point", size= 2) +
+  geom_sf(data=DC_line, 
+          aes(colour = NAME), 
+          show.legend = "point", size= 2) +
+  scale_colour_manual(values = c("blue","green","orange","red","black","yellow"))+
+  labs(title="Metro Station", 
+       subtitle="Washington, DC", 
+       caption="Figure 2.5") +
+  mapTheme()
+```
+
+### Relating Metro Stops and Tracts
+
+```{r}
+stopBuffer <- st_buffer(DC_stop, 2640)# 2640 is understood as feet, half mile (2,640 ft.) of stations
+
+stopUnion <- st_union(st_buffer(DC_stop, 2640))
+
+DCBuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+```
+
+```{r}
+buffer <- filter(DCBuffers, Legend=="Unioned Buffer")
+allTracts <- rbind(tracts12,tracts22)
+
+```
+
+# Indicator Maps
+
+```{r, warning=FALSE, message=FALSE}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2012", MedRent * 1.14, MedRent),
+         pctWhite_1 = pctWhite*100,
+         pctPoverty_1 = pctPoverty*100,
+         pctBachelors_1 = pctBachelors*100)
+```
+
+```{r}
+ p1 <- ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = q5(MedRent.inf))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red", linewidth = 0.5)+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "MedRent.inf"),
+                      name = "Rent\n(Quintile Breaks)") +
+    labs(title = " Median Rent 2012-2022", subtitle = "Real Dollars") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=20))
+
+
+#print(p1)
+```
+
+```{r}
+  p2 <- ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = q5(TotalPop))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red", linewidth = 0.5)+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "TotalPop"),
+                      name = "Population\n(Quintile Breaks)") +
+    labs(title = "Population  2012-2022", subtitle = "Washington DC") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=20))
+
+#print(p2)
+```
+
+```{r}
+  p3 <- ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = q5(pctPoverty_1))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red",linewidth = 0.5)+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "pctPoverty_1"),
+                      name = "pctPoverty\n(Quintile Breaks)") +
+    labs(title = "pctPoverty 2012-2022", subtitle = "Washington DC") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=20))
+
+#print(p3)
+```
+
+```{r}
+  p4 <- ggplot(allTracts.group)+
+    geom_sf(data = st_union(tracts12))+
+    geom_sf(aes(fill = q5(Aggregate_num_vehicles_commuting))) +
+    geom_sf(data = buffer, fill = "transparent", color = "red",linewidth = 0.5)+
+    scale_fill_manual(values = palette5,
+                      labels = qBr(allTracts.group, "Aggregate_num_vehicles_commuting"),
+                      name = "num_cars\n(Quintile Breaks)") +
+    labs(title = "Aggregate car number 2012-2022", subtitle = "Washington DC") +
+    facet_wrap(~year)+
+    mapTheme() + 
+    theme(plot.title = element_text(size=20))
+
+#print(p4)
+```
+
+2.  **Four small-multiple (2012 & 2022+) visualizations comparing four selected Census variables across time and space (TOD vs. non-TOD).**
+
+```{r}
+combined_plot <- grid.arrange(p1, p2, p3, p4, 
+                              ncol = 2) 
+
+print(combined_plot)
+```
+
+Rent: Generally, rental costs increased between 2012 and 2022. The rent in the TOD area is higher than in the non-TOD area, which represents people willing to pay more rent in the TOD area for public transit.
+
+Aggregate car number:
+
+The TOD area has a decreasing Aggregate number of vehicles commuting between 2012 and 2022. It seems that residents who live in the TOD area are willing to take more transit than driving to commute.
+
+Poverty: Overall, poverty concentrates more in the TOD area. There are few stations in the southern and eastern areas, which include relatively high poverty rates.
+
+Population: The southwest and downtown area has a large density of DC metro stations, which has a lot of federal attractions in this area, and many tourists will come to this area for traveling, so there are not a lot of people in that area. At the same time, there is a relatively high-density population in the northern and eastern parts of the TOD area. 
+
+# TOD Indicator Tables
+
+```{r}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent, na.rm = T),
+            Population = mean(TotalPop, na.rm = T),
+            #Percent_White = mean(pctWhite, na.rm = T),
+            Aggregate_num_vehicles_commuting = mean(Aggregate_num_vehicles_commuting, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+
+#kable(allTracts.Summary) %>% kable_styling() %>% footnote(general_title = "\n",general = "Table 2.2")
+```
+
+3.  **One grouped bar plot making these same comparisons.**
+
+```{r, warning=FALSE}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Variable, scales = "free", ncol=5) +
+  scale_fill_manual(values = c("#bae4bc", "#0868ac")) +
+  labs(title = "Indicator differences across time and space" )+
+  plotTheme() + 
+  theme(legend.position="bottom")
+```
+
+The bar graph is the best way to visualize the difference between the Non-TOD and TOD areas. The number of vehicles and rent represents residents' willingness to change during 2012-2022. The aggregate number of vehicles reduced during 2012-2022, particularly in the TOD area. 
+On the other hand, Rental costs have increased during 2012-2022, especially largely rising in the TOD area. In 2012, the Non-TOD area had a higher poverty rate than the TOD area. Conversely, the Non-TOD area has a more increased poverty rate than the TOD area in 2022. Overall, the poverty rate has barely decreased during 2012-2022. 
+However, there has been a decreasing poverty rate in the TOD area and an increasing poverty rate NON-TOD area during 2012-2022. The population has slightly declined and increased poverty rate in the TOD area, indicating that people cannot afford the rental while leaving transit-rich areas(TOD area).
+
+4.  **One table making these same comparisons**
+
+```{r}
+
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Table 2.3")
+
+```
+
+The table is the best way to represent the precise Data. The poverty and population have larger changes between years and TOD areas. However, people have sharply declined to commute by car in the TOD area between 2012 and 2022. Moreover, rent has increased by over a few hundred USD, and the TOD area has increased by around 1000 USD.
+
+# graduated symbol maps
+
+5.  **Create two graduated symbol maps of population and rent within 0.5 mile of each transit station. A graduated symbol map represents quantities for each transit station proportionally - geom_point can use a size aesthetic to make this kind of visualization.**
+
+```{r, warning=FALSE}
+#stop <- st_buffer(DC_stop, 2640)
+ # Spatial join: Find the intersection between buffers and tracts
+
+station_tract <- st_intersection(DC_stop, allTracts.group)
+
+# Calculate the population within each buffer by summing the population in intersecting tracts
+station_tract_summary <- st_sf(st_buffer(station_tract, 2640)) %>%
+  st_centroid() %>%
+    mutate(lon = st_coordinates(geometry)[,1],
+         lat = st_coordinates(geometry)[,2])
+
+```
+
+```{r, warning=FALSE}
+
+ggplot() +
+  geom_sf(data=allTracts, color = 'transparent') +
+  #geom_sf(data= buffer_population_summary, aes(fill = total_population)) +
+  geom_point(data = station_tract_summary,
+             aes(x= lon,
+                 y= lat,
+                 size = TotalPop),
+             color = "red", alpha = 0.25)  +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) + 
+  labs(title = "population and half mile of each Metro station") +
+  mapTheme()
+  
+```
+
+These graduated symbol maps represent quantitative data population within 0.5 miles of each Metro station. This has a slight population decline in the half mile of each metro station.
+
+```{r, warning=FALSE}
+ggplot() +
+  geom_sf(data=allTracts, color = 'transparent') +
+  #geom_sf(data= buffer_population_summary, aes(fill = total_population)) +
+  geom_point(data = station_tract_summary,
+             aes(x= lon,
+                 y= lat,
+                 size = MedRent),
+             color = "red", alpha = 0.25)  +
+  scale_fill_viridis_c() +
+  facet_wrap(~year) + 
+  labs(title = "rent and half miles of each Metro station") +
+  mapTheme()
+  
+```
+
+The rent within 0.5 miles of Metro station has grown between 2012 and 2022.
+
+According to graduated symbol maps of population and rent within 0.5 miles of each transit station, rising rental costs cause people to relocate to non-rich transit areas. As a result, increasing rental costs lead to a population decline.
+
+# Summarizing data
+
+```{r, warning=FALSE}
+
+DC_stop_MRB <- multipleRingBuffer(st_union(DC_stop),
+                                maxDistance = 47520,
+                                interval =  2640)
+
+allTracts.rings <- allTracts %>% 
+  select(GEOID, year) %>% 
+  st_centroid() %>% 
+  st_join(DC_stop_MRB, join = st_intersects) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+
+
+allTracts.rings.summary <- st_drop_geometry(allTracts.rings) %>%
+    group_by(distance, year) %>%
+    summarize(Mean_Rent = mean(MedRent, na.rm=T))
+```
+
+6.  **Create a geom_line plot that shows mean rent as a function of distance to subway stations (Figure 1.17).**
+
+To do this you will need to use the multipleRingBuffer function found in the functions.R script. Check out the MRB_Explained markdown on Canvas for more info on how this works!
+
+```{r, warning=FALSE}
+ggplot(allTracts.rings.summary,
+       aes(distance, Mean_Rent, colour=year)) +
+      geom_point(size=3) + 
+  labs(title="Rent as function of distance to Metro station") +
+  geom_line(size=2)
+```
+
+Comparing two different years, the rent has increased by around 1k in the under 1 mile, which indicates residents' willingness to pay more in rich transit areas. However, the 2.5 miles to the metro station also has larger growth in this area, but other distances do not like larger growth as under 1 mile to the Metro stations. 
+Moreover, there has been no significant change in the relationship between rent and distance to Metro stations.
+
+# Conclusion
+
+Regarding research analysis, the Transit-Oriented Development (TOD) concept has represented a dominant role in commuting patterns in Washington DC. In the TOD area, the aggregate number of vehicles for commuting has shapely declined, reflecting people's willingness to take transit for commuting which effectively advocates urban sustainability.  At the same time, the TOD area causes rising rental costs that emphasize high-demand housing in the rich transit area due to the convenient transit and time-saving commutes.  However, improving rental costs leads to poverty growth and a slight population reduction because residents cannot afford the rent and are forced to relocate to another area. 
+
+Despite these limitations, I believe the TOD concept contributes to greater mobility equity for the neighborhood in the long term. As cities continue investing in public transit, utilizing government policies provides affordable housing in the TOD area, leading more people to earn more job opportunities. TOD concepts aim for sustainable, inclusive urban growth, reducing traffic issues, and providing a higher quality of life for neighborhoods across socioeconomic groups.
