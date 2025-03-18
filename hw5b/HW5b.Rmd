@@ -1,0 +1,644 @@
+---
+title: "HW5b - Bike Share Prediction"
+date: "2024-11-13"
+author: Jiatong Su
+output:
+  html_document:
+    theme: simplex
+    toc: yes
+    toc_float: yes
+    progress: hide
+    code_folding: hide
+    code_download: yes
+  params:
+  include_warnings: false  # Add this line to suppress warnings
+---
+
+# Introduction
+
+Bike share systems provide an eco-friendly transportation option, but one of the bog operational challenge is "re-balancing", which ensuring bikes are evenly distributed across stations to meet demand.  Without proper re-balancing, some stations may face bike shortages while others experience overcrowding, leading to inefficiencies and user dissatisfaction. This analysis examines bike prediction for the NY city Bike in Jersey city, which utilize NY city Bike data in April, 2022, along with census and climate information.
+
+By developing a space-time predictive model, the study identifies patterns in bike demand based on socio-economic factors, weather, and commuting trends, particularly high deman area that near the Hudson River and Manhattan. These insights aim to improve bike re-balancing strategies, ensuring efficient operations and better user satisfaction.
+
+The predictive model incorporates time-lag features to anticipate demand up to several hours ahead, enabling proactive measures. By analyzing recent ride trends and external factors like weather, the system will optimize re-balancing operations, ensuring stations are prepared to meet future demand. This approach not only improves operational efficiency and promotes the bike share system as a reliable urban mobility solution.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(tmap)
+library(ggplot2)
+library(kableExtra)
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm")
+                  )
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+
+
+tidycensus::census_api_key("e79f3706b6d61249968c6ce88794f6f556e5bf3d", overwrite = TRUE)
+
+dat <- read_csv("/Users/jiatong/Desktop/musa5080_PPA/hw5b/JC-202204-citibike-tripdata.csv") #202204
+
+```
+
+```{r, include=FALSE}
+dat_1 <- dat %>%
+  mutate(interval60 = floor_date(ymd_hms(started_at), unit = "hour"),
+         interval15 = floor_date(ymd_hms(started_at), unit = "15 mins"),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+
+dat_1[1:3, c(1,4:7)]
+
+```
+
+```{r, include=FALSE}
+dat_1 %>% group_by(week) %>% 
+  summarise(
+    count = n()  # Counts the number of entries per week
+  ) %>% kable()
+```
+
+```{r, include=FALSE}
+NJ_Census <- 
+  get_acs(geography = "tract", 
+          variables = c("B01003_001", "B19013_001", 
+                        "B02001_002", "B08013_001",
+                        "B08012_001", "B08301_001", 
+                        "B08301_010", "B01002_001"), 
+          year = 2022, 
+          state = "NJ", 
+          geometry = TRUE, 
+          county = "Hudson",
+          output = "wide") %>%
+  rename(Total_Pop =  B01003_001E,
+         Med_Inc = B19013_001E,
+         Med_Age = B01002_001E,
+         White_Pop = B02001_002E,
+         Travel_Time = B08013_001E,
+         Num_Commuters = B08012_001E,
+         Means_of_Transport = B08301_001E,
+         Total_Public_Trans = B08301_010E) %>%
+  select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
+         Means_of_Transport, Total_Public_Trans,
+         Med_Age,
+         GEOID, geometry) %>%
+  mutate(Percent_White = White_Pop / Total_Pop,
+         Mean_Commute_Time = Travel_Time / Total_Public_Trans,
+         Percent_Taking_Public_Trans = Total_Public_Trans / Means_of_Transport) %>% 
+  st_transform(crs = 4326)
+
+
+NJTracts <- 
+  NJ_Census %>%
+  as.data.frame() %>%
+  distinct(GEOID, .keep_all = TRUE) %>%
+  select(GEOID, geometry) %>% 
+  st_sf
+
+
+dat_census <- st_join(dat_1 %>% 
+          filter(is.na(start_lng) == FALSE &
+                   is.na(start_lat) == FALSE &
+                   is.na(end_lat) == FALSE &
+                   is.na(end_lng) == FALSE) %>%
+          st_as_sf(., coords = c("start_lng", "start_lat"), crs = 4326),
+        NJTracts %>%
+          st_transform(crs=4326),
+        join=st_intersects,
+              left = TRUE) %>%
+  rename(Origin.Tract = GEOID) %>%
+  mutate(start_lng = unlist(map(geometry, 1)),
+         start_lat = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)%>%
+  st_as_sf(., coords = c("end_lng", "end_lat"), crs = 4326) %>%
+  st_join(., NJTracts %>%
+            st_transform(crs=4326),
+          join=st_intersects,
+          left = TRUE) %>%
+  rename(Destination.Tract = GEOID)  %>%
+  mutate(end_lng = unlist(map(geometry, 1)),
+         end_lat = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)
+```
+
+# Weather data
+
+Since this analysis focuses on Jersey City, weather data from Newark Airport (EWR) is used. The following time series plots display precipitation, wind speed, and temperature for each hour in Jersey City during April 2022. The plots reveal a few days of precipitation, with a noticeable increase in temperature around mid-April.
+
+```{r, include=FALSE}
+weather.Panel <- 
+  riem_measures(station = "EWR", date_start = "2022-04-01", date_end = "2022-04-30") %>%
+  dplyr::select(valid, tmpf, p01i, sknt)%>%
+  replace(is.na(.), 0) %>%
+    mutate(interval60 = ymd_h(substr(valid,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60, label=TRUE)) %>%
+    group_by(interval60) %>%
+    summarize(Temperature = max(tmpf),
+              Precipitation = sum(p01i),
+              Wind_Speed = max(sknt)) %>%
+    mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+
+glimpse(weather.Panel)
+
+```
+
+```{r}
+grid.arrange(
+  ggplot(weather.Panel, aes(interval60,Precipitation)) + geom_line() + 
+  labs(title="Percipitation", x="Hour", y="Perecipitation") + plotTheme,
+  ggplot(weather.Panel, aes(interval60,Wind_Speed)) + geom_line() + 
+    labs(title="Wind Speed", x="Hour", y="Wind Speed") + plotTheme,
+  ggplot(weather.Panel, aes(interval60,Temperature)) + geom_line() + 
+    labs(title="Temperature", x="Hour", y="Temperature") + plotTheme,
+  top="Weather Data - ERW airport - Arpil, 2022")
+```
+
+# Describe and Explore the Data
+
+```{r, include=FALSE}
+monday <- 
+  mutate(dat_census,
+         monday = ifelse(dotw == "Mon" & hour(interval60) == 1,
+                         interval60, 0)) %>%
+  filter(monday != 0)
+
+Friday <- 
+  mutate(dat_census,
+         Friday = ifelse(dotw == "Fri" & hour(interval60) == 1,
+                         interval60, 0)) %>%
+  filter(Friday != 0)
+
+```
+
+The Time Series Plot below illustrate Bike share tripe per hours in Jersey City. The blue line is used to visualize the `Friday`. In can see the relatively low ride share in early April.
+
+```{r}
+ggplot(dat_census %>%
+         group_by(interval60) %>%
+         tally())+
+  geom_line(aes(x = interval60, y = n))+
+  labs(title="Bike share trips per hr. Jersey City, April, 2022",
+       x="Date", 
+       y="Number of trips")+
+          #geom_vline(data = monday, aes(xintercept = monday), color = "red") +
+          geom_vline(data = Friday, aes(xintercept = Friday), color = "blue") +
+
+  plotTheme
+```
+
+```{r, include=FALSE}
+dat_census %>%
+        mutate(time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+         group_by(interval60, start_station_name, time_of_day) %>%
+         tally()%>%
+  group_by(start_station_name, time_of_day)%>%
+  summarize(mean_trips = mean(n))%>%
+  ggplot()+
+  geom_histogram(aes(mean_trips), binwidth = 1)+
+  labs(title="Mean Number of Hourly Trips Per Station. Jersey, May, 2018",
+       x="Number of trips", 
+       y="Frequency")+
+  facet_wrap(~time_of_day)+
+  plotTheme
+```
+
+The following plots display bike share trips in Jersey City, broken down by day of the week and by weekdays versus weekends. The data shows a peak in trip counts on Fridays, with overall higher trip volumes on weekdays compared to weekends. This trend indicates that bike sharing is more commonly used for commuting or weekday activities than for weekend use.
+
+```{r}
+ggplot(dat_census %>% mutate(hour = hour(started_at)))+
+     geom_freqpoly(aes(hour, color = dotw), binwidth = 1)+
+  labs(title="Bike share trips in Jersey, by day of the week, April, 2022",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+
+```
+
+```{r}
+ggplot(dat_census %>% 
+         mutate(hour = hour(started_at),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday")))+
+     geom_freqpoly(aes(hour, color = weekend), binwidth = 1)+
+  labs(title="Bike share trips in Jersey - weekend vs weekday, April, 2022",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+
+```
+
+The maps below show the hourly bike share trips by station. Weekdays generally have higher bike share trips compared to weekends. Overall, stations near the Hudson River, especially those close to Manhattan, exhibit relatively higher bike share counts, particularly during weekday PM rush hours.
+
+```{r}
+ggplot()+
+  geom_sf(data = NJTracts %>%
+          st_transform(crs=4326))+
+  geom_point(data = dat_census %>% 
+            mutate(hour = hour(started_at),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+                time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 19 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 19 ~ "PM Rush"))%>%
+              group_by(start_station_id, start_lat, start_lng, weekend, time_of_day) %>%
+              tally() ,
+            aes(x=start_lng, y = start_lat, color = n), 
+            fill = "transparent", alpha = 0.9, size = 0.9)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lng), max(dat_census$start_lng))+
+  facet_grid(weekend ~ time_of_day)+
+  labs(title="Bike share trips per hr by station. Jersey, April, 2022")+
+  mapTheme
+
+```
+
+```{r, include=FALSE}
+length(unique(dat_census$interval60)) * length(unique(dat_census$start_station_id))
+
+```
+
+```{r, include=FALSE}
+study.panel <- 
+  expand.grid(interval60=unique(dat_census$interval60), 
+              start_station_id = unique(dat_census$start_station_id)) %>%
+  left_join(., dat_census %>%
+              select(start_station_id, start_station_name, Origin.Tract, start_lng, start_lat )%>%
+              distinct() %>%
+              group_by(start_station_id) %>%
+              slice(1))
+
+nrow(study.panel)
+```
+
+```{r, include=FALSE}
+ride.panel_1 <- 
+  dat_census %>%
+  mutate(Trip_Counter = 1) %>%
+  right_join(study.panel) %>% 
+  group_by(interval60, start_station_id, start_station_name, Origin.Tract, start_lng, start_lat) %>%
+  summarize(Trip_Count = sum(Trip_Counter, na.rm=T)) %>%
+  left_join(weather.Panel) %>%
+  ungroup() %>%
+  filter(is.na(start_station_id) == FALSE) %>%
+  mutate(week = week(interval60),
+         dotw = wday(interval60, label = TRUE)) %>%
+  filter(is.na(Origin.Tract) == FALSE)
+```
+
+```{r, include=FALSE}
+ride.panel <- 
+  left_join(ride.panel_1, NJ_Census %>%
+              as.data.frame() %>%
+              select(-geometry), by = c("Origin.Tract" = "GEOID"))
+```
+
+```{r, include=FALSE}
+ride.panel <- 
+  ride.panel %>% 
+  arrange(start_station_id, interval60) %>% 
+  mutate(lagHour = dplyr::lag(Trip_Count,1),
+         lag2Hours = dplyr::lag(Trip_Count,2),
+         lag3Hours = dplyr::lag(Trip_Count,3),
+         lag4Hours = dplyr::lag(Trip_Count,4),
+         lag12Hours = dplyr::lag(Trip_Count,12),
+         lag1day = dplyr::lag(Trip_Count,24),
+         holiday = ifelse(yday(interval60) == 148,1,0)
+         ) %>%
+   mutate(day = yday(interval60))  
+
+as.data.frame(ride.panel) %>%
+    group_by(interval60) %>% 
+    summarise_at(vars(starts_with("lag"), "Trip_Count"), mean, na.rm = TRUE) %>%
+    gather(Variable, Value, -interval60, -Trip_Count) %>%
+    mutate(Variable = factor(Variable, levels=c("lagHour","lag2Hours","lag3Hours","lag4Hours",
+                                                "lag12Hours","lag1day")))%>%
+    group_by(Variable) %>%  
+    summarize(correlation = round(cor(Value, Trip_Count),2))
+
+```
+
+# Run Model and Predict for test data
+
+This section split data into a training and test set and develop a 3 week training set and a 2 week test set of all the stations. In the following analysis, four different linear regression are estimated on `ride.Train`. - `reg 1` focuses on just time, including hour fixed effects, day of week and weather temperature - `reg 2` focuses on space effect with the station name fixed effects. - `reg 3` focuses on both time and space fixed effects. - `reg 4` adds the `lag` features.
+
+The time lag variables will add additional nuance about the demand during a given time period - hours before and during that day.
+
+```{r}
+ride.Train <- filter(ride.panel, week >= 15)
+ride.Test <- filter(ride.panel, week < 15)
+
+reg1 <- 
+  lm(Trip_Count ~  hour(interval60) + dotw + Temperature,  data=ride.Train)
+
+reg2 <- 
+  lm(Trip_Count ~  start_station_name + dotw + Temperature,  data=ride.Train)
+
+reg3 <- 
+  lm(Trip_Count ~  start_station_name + hour(interval60) + dotw + Temperature + Precipitation, 
+     data=ride.Train)
+
+reg4 <- 
+  lm(Trip_Count ~  start_station_name +  hour(interval60) + dotw + Temperature + Precipitation +
+                   lagHour + lag2Hours +lag3Hours + lag12Hours + lag1day, 
+     data=ride.Train)
+
+#reg5 <- 
+  #lm(Trip_Count ~  start_station_name + hour(interval60) + dotw + Temperature + Precipitation +
+                   #lagHour + lag2Hours +lag3Hours +lag12Hours + lag1day + holiday, 
+     #data=ride.Train)
+```
+
+```{r, warning=FALSE}
+ride.Test.weekNest <- 
+  ride.Test %>%
+  nest(-week) 
+
+model_pred <- function(dat, fit){
+   pred <- predict(fit, newdata = dat)}
+
+```
+
+```{r, warning=FALSE, include=FALSE}
+week_predictions <- 
+  ride.Test.weekNest %>% 
+        mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+           BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+           CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+           DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+           #ETime_Space_FE_timeLags_holidayLags = map(.x = data, fit = reg5, .f = model_pred)
+           ) %>% 
+    gather(Regression, Prediction, -data, -week) %>%
+    mutate(Observed = map(data, pull, Trip_Count),
+           Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+           MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+           sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+
+week_predictions
+```
+
+Mean Absolute Error (MAE) is calculated on `ride.Test` for each model. The plots below illustrate the MAE values for the four models. It displays the highest MAE value in the model that only focuses on time, and the lowest MAE value in the model that add `lag` features. Therefore, the time lag feature lead the model be better prediction.
+
+```{r}
+week_predictions %>%
+  dplyr::select(week, Regression, MAE) %>%
+  gather(Variable, MAE, -Regression, -week) %>%
+  ggplot(aes(week, MAE)) + 
+    geom_bar(aes(fill = Regression), position = "dodge", stat="identity") +
+    scale_fill_manual(values = palette5) +
+    labs(title = "Mean Absolute Errors by model specification and week") +
+  plotTheme
+```
+
+The time series plot below shows the predicted and observed bike counts for a 2-week test set. Overall, the models tend to under-predict the observed values. Among all regression models, Model 4, which incorporates all features, demonstrates the highest accuracy. Therefore, the subsequent analysis is based on Model 4.
+
+```{r, warning=FALSE, message=FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id)) %>%
+    dplyr::select(interval60, start_station_id, Observed, Prediction, Regression) %>%
+    unnest() %>%
+    gather(Variable, Value, -Regression, -interval60, -start_station_id) %>%
+    group_by(Regression, Variable, interval60) %>%
+    summarize(Value = sum(Value)) %>%
+    ggplot(aes(interval60, Value, colour=Variable)) + 
+      geom_line(size = 1.1) + 
+      facet_wrap(~Regression, ncol=1) +
+      labs(title = "Predicted/Observed bike share time series", subtitle = "Jersey; A test set of 2 weeks",  x = "Hour", y= "Station Trips") +
+      plotTheme
+```
+
+The map below displays the distribution of MAE values using Model 4 in Jersey City. Higher MAE values are observed near the Hudson River, particularly in areas closer to Manhattan.
+
+```{r, warning=FALSE, message=FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id), 
+           start_lat = map(data, pull, start_lat), 
+           start_lng = map(data, pull, start_lng)) %>%
+    select(interval60, start_station_id, start_lng, start_lat, Observed, Prediction, Regression) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags") %>%
+  group_by(start_station_id, start_lng, start_lat) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+ggplot(.)+
+  geom_sf(data = NJ_Census, color = "grey", fill = "transparent")+
+  geom_point(aes(x = start_lng, y = start_lat, color = MAE, size = MAE), 
+             fill = "transparent", alpha = 0.8) +
+  scale_colour_viridis(
+    name = "Mean Absolute Error", # Combined title for color and size
+    direction = -1,
+    option = "D",
+    discrete = FALSE
+  ) +
+  scale_size_continuous(
+    name = "Mean Absolute Error", # Same title as color to combine legend
+    range = c(1, 5) # Adjust size range as needed
+  ) +
+  guides(
+    color = guide_legend() # Use a single legend guide
+  ) +
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lng), max(dat_census$start_lng))+
+  labs(title="Mean Abs Error, Test Set, Model 4")+
+  mapTheme
+```
+
+# Space-Time Error Evaluation
+
+The following scatterplots show the observed versus predicted values for different time periods of the day on weekdays and weekends. Overall, the predicted values tend to under-predict the observed values. However, the weekend exhibits relatively smaller errors compared to weekdays, as indicated by the red line being closer to the black line.
+
+```{r, warning=FALSE, message=FALSE}
+
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id), 
+           start_lat = map(data, pull, start_lat), 
+           start_lng = map(data, pull, start_lng),
+           dotw = map(data, pull, dotw)) %>%
+    select(interval60, start_station_id, start_lng, 
+           start_lat, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+  ggplot()+
+  geom_point(aes(x= Observed, y = Prediction))+
+    geom_smooth(aes(x= Observed, y= Prediction), method = "lm", se = FALSE, color = "red")+
+    geom_abline(slope = 1, intercept = 0)+
+  facet_grid(time_of_day~weekend)+
+  labs(title="Observed vs Predicted",
+       x="Observed trips", 
+       y="Predicted trips")+
+  plotTheme
+```
+
+```{r, warning=FALSE, message=FALSE, include=FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id), 
+           start_lat = map(data, pull, start_lat), 
+           start_lng = map(data, pull, start_lng),
+           dotw = map(data, pull, dotw) ) %>%
+    select(interval60, start_station_id, start_lng, 
+           start_lat, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  group_by(start_station_id, weekend, time_of_day, start_lng, start_lat) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  ggplot(.)+
+  geom_sf(data = NJ_Census, color = "grey", fill = "transparent")+
+   geom_point(aes(x = start_lng, y = start_lat, color = MAE, size = MAE), 
+             fill = "transparent", alpha = 0.6) +
+  scale_colour_viridis(
+    name = "Mean Absolute Error", # Combined title for color and size
+    direction = -1,
+    option = "D",
+    discrete = FALSE
+  ) +
+  scale_size_continuous(
+    name = "Mean Absolute Error", # Same title as color to combine legend
+    range = c(1, 5) # Adjust size range as needed
+  ) +
+  guides(
+    color = guide_legend() # Use a single legend guide
+  ) +
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lng), max(dat_census$start_lng))+
+  facet_grid(weekend~time_of_day)+
+  labs(title="Mean Absolute Errors, Test Set")+
+  mapTheme
+```
+
+The maps below display the distribution of MAE values in Jersey City during different time periods on weekdays and weekends. Overall, areas near the Hudson River exhibit relatively higher MAE values. Additionally, the model performs better during the overnight period, as indicated by lower MAE values.
+
+```{r, warning=FALSE, message=FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id), 
+           start_lat = map(data, pull, start_lat), 
+           start_lng = map(data, pull, start_lng),
+           dotw = map(data, pull, dotw) ) %>%
+    select(interval60, start_station_id, start_lng, 
+           start_lat, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  group_by(start_station_id, weekend, time_of_day, start_lng, start_lat) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  ggplot(.)+
+  geom_sf(data = NJ_Census, color = "grey", fill = "transparent")+
+   geom_point(aes(x = start_lng, y = start_lat, color = MAE), 
+             fill = "transparent", alpha = 0.5, size = 1.5) +
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D") +
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lng), max(dat_census$start_lng))+
+  facet_grid(weekend~time_of_day)+
+  labs(title="Mean Absolute Errors, Test Set")+
+  mapTheme
+```
+
+The following scatterplots explore the relationship between errors and socio-economic features. The analysis reveals that areas with lower income, a smaller proportion of residents using public transportation, and a lower percentage of white residents tend to have lower MAE values, indicating that these areas are more accurately predicted by the model.
+
+```{r, warning=FALSE, message=FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station_id = map(data, pull, start_station_id), 
+           start_lat = map(data, pull, start_lat), 
+           start_lng = map(data, pull, start_lng),
+           dotw = map(data, pull, dotw),
+           Percent_Taking_Public_Trans = map(data, pull, Percent_Taking_Public_Trans),
+           Med_Inc = map(data, pull, Med_Inc),
+           Percent_White = map(data, pull, Percent_White)) %>%
+    select(interval60, start_station_id, start_lat, 
+           start_lng, Observed, Prediction, Regression,
+           dotw, Percent_Taking_Public_Trans, Med_Inc, Percent_White) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  filter(time_of_day == "AM Rush") %>%
+  group_by(start_station_id, Percent_Taking_Public_Trans, Med_Inc, Percent_White) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  gather(-start_station_id, -MAE, key = "variable", value = "value")%>%
+  ggplot(.)+
+  #geom_sf(data = chicagoCensus, color = "grey", fill = "transparent")+
+  geom_point(aes(x = value, y = MAE), alpha = 0.4)+
+  geom_smooth(aes(x = value, y = MAE), method = "lm", se= FALSE)+
+  facet_wrap(~variable, scales = "free")+
+  labs(title="Errors as a function of socio-economic variables",
+       y="Mean Absolute Error (Trips)")+
+  plotTheme
+```
+
+# Conclusion
+
+Overall, bike stations near the Hudson River, particularly those close to Manhattan, exhibit higher bike share counts, likely reflecting a high volume of commuters traveling for work, study, or other daily activities. Additionally, these stations tend to have relatively larger Mean Absolute Error (MAE) values, showing a tendency for under-prediction compared to other stations. This suggests a high demand for bikes in areas near the Hudson River. To address bike re-balancing plan, it is essential to ensure that stations anticipated to experience high demand are adequately supplied with bikes. Based on the model analysis, allocating more bikes to stations near the Hudson River is a necessary step to meet this demand effectively.
